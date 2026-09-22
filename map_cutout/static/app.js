@@ -16,11 +16,19 @@ const layerTree = new LayerTree($("#layer-tree"), {
   onMove: (id, targetId) => action(async () => { const index=state.layers.findIndex(layer=>layer.id===targetId); await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`, {index}); state.setDirty(true); await state.loadLayers(); }),
   onDelete: id => action(async () => {
     const layer = state.layers.find(item => item.id === id);
-    if (!layer || !confirm(`确定删除图层“${layer.name}”吗？可用 Ctrl+Z 撤销。`)) return;
+    if (!layer || layer.kind === "original") return;
     await state.api.delete(`/api/maps/${state.currentMapId}/layers/${id}`);
     state.selectedLayerIds.delete(id);
-    editor.maskImages.delete(id); editor.maskOverlays.delete(id);
-    state.setDirty(true); await state.loadLayers(); state.setStatus("图层已删除");
+    if (state.editingLayerId === id) {
+      state.editingLayerId = null;
+      editor.setMaskEdit(null);
+      editor.cancelLasso();
+      activateTool("select");
+    }
+    editor.dropLocalMask(id);
+    state.setDirty(true);
+    await state.loadLayers();
+    state.setStatus("图层已删除");
   }),
 });
 
@@ -104,7 +112,7 @@ function activateTool(tool) {
   document.querySelectorAll("[data-tool]").forEach(item => item.classList.toggle("active", item.dataset.tool === tool));
   editor.setTool(tool);
 }
-function beginMaskEdit(id) {
+function beginMaskEdit(id, tool = "lasso-add") {
   const layer = state.layers.find(item => item.id === id);
   if (!layer?.mask_path) { toast("底图不能这样改"); return; }
   if (layer.locked) { toast("这个图层已锁定，请先点最右边的锁解锁"); return; }
@@ -112,8 +120,10 @@ function beginMaskEdit(id) {
   state.editingLayerId = id;
   state.selectedLayerIds = new Set([id]);
   editor.setMaskEdit(id);
-  activateTool("lasso-add");
-  state.setStatus(`正在编辑「${layer.name}」。沿着边缘画一圈，画回到发亮的起点。围住的里面才会加进来或减掉。`);
+  activateTool(tool);
+  state.setStatus(tool === "brush" || tool === "eraser"
+    ? `正在编辑「${layer.name}」。图层可以是空的，直接用画笔涂，涂过的地方会留在这一层。`
+    : `正在编辑「${layer.name}」。沿着边缘画一圈，画回到发亮的起点。围住的里面才会加进来或减掉。`);
 }
 function finishMaskEdit() {
   state.editingLayerId = null;
@@ -137,12 +147,19 @@ $("#zoom-out").addEventListener("click", () => editor.setZoom(editor.view.scale 
 $("#add-folder").addEventListener("click", () => action(async () => { const name=prompt("文件夹名称","新文件夹"); if(!name)return; const folder=await state.api.post(`/api/maps/${state.currentMapId}/folders`,{name}); state.folders.push(folder); state.setDirty(true); state.emit(); }));
 $("#add-layer").addEventListener("click", () => action(async () => {
   if (!state.currentMapId) throw new Error("请先导入地图");
-  const name = prompt("图层名称", "新图层");
-  if (!name || !name.trim()) return;
-  const layer = await state.api.post(`/api/maps/${state.currentMapId}/layers`, {name: name.trim()});
+  const layer = await state.api.post(`/api/maps/${state.currentMapId}/layers`, {name: "新图层"});
   state.setDirty(true);
   await state.loadLayers();
-  beginMaskEdit(layer.id);
+  beginMaskEdit(layer.id, "brush");
+  await editor.loadMasks();
+  let name = null;
+  try { name = prompt("图层名称", layer.name || "新图层"); } catch { name = null; }
+  const cleaned = (name || "").trim();
+  if (!cleaned || cleaned === layer.name) return;
+  await state.api.patch(`/api/maps/${state.currentMapId}/layers/${layer.id}`, {name: cleaned});
+  state.setDirty(true);
+  await state.loadLayers();
+  state.setStatus(`正在编辑「${cleaned}」。图层可以是空的，直接用画笔涂，涂过的地方会留在这一层。`);
 }));
 $("#merge").addEventListener("click", () => action(async () => { const ids=[...state.selectedLayerIds].filter(id=>state.layers.find(layer=>layer.id===id)?.kind!=="original"); if(ids.length<2)throw new Error("请先选择至少两个蒙版图层"); await state.api.post(`/api/maps/${state.currentMapId}/layers/merge`,{layer_ids:ids}); state.selectedLayerIds.clear(); state.setDirty(true); await state.loadLayers(); }));
 $("#undo").addEventListener("click",()=>action(async()=>{editor.forgetLocalMasks();await state.api.post(`/api/maps/${state.currentMapId}/undo`);state.setDirty(true);await state.loadLayers();}));

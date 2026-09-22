@@ -123,6 +123,35 @@ def test_polygon_edit_changes_existing_mask_without_adding_a_layer(tmp_path):
     assert [layer["id"] for layer in after] == [layer["id"] for layer in before]
 
 
+def test_blank_layer_can_be_painted_without_a_prior_region(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    before = client.get(f"/api/maps/{map_state.id}/layers").json()
+
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={}).json()
+    assert created["name"] == "新图层"
+    assert created["kind"] == "mask"
+    assert int(np.asarray(Image.open(created["mask_path"]).convert("L")).max()) == 0
+
+    first = client.post(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/paint",
+        json={"points": [[4, 4], [6, 4]], "radius": 2, "value": 255},
+    )
+    second = client.post(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/paint",
+        json={"points": [[14, 8]], "radius": 2, "value": 255},
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    mask = np.asarray(Image.open(created["mask_path"]).convert("L"))
+    assert mask[4, 5] == 255
+    assert mask[8, 14] == 255
+    assert mask[0, 0] == 0
+    after = client.get(f"/api/maps/{map_state.id}/layers").json()
+    assert len(after) == len(before) + 1
+
+
 def test_new_named_layer_starts_empty_and_lasso_adds_only_its_interior(tmp_path):
     app_services = services(tmp_path)
     client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
