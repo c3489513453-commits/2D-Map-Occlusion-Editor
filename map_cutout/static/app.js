@@ -2,6 +2,7 @@ import { AppState, ApiClient } from "/static/state.js";
 import { CanvasEditor } from "/static/canvas_editor.js";
 import { LayerTree } from "/static/layer_tree.js";
 import { InferenceControls } from "/static/inference_controls.js";
+import { ExportDialog } from "/static/export_dialog.js";
 
 const state = new AppState(new ApiClient());
 const $ = selector => document.querySelector(selector);
@@ -90,5 +91,7 @@ new InferenceControls({state,editor,api:state.api,toast,elements:{
   detect:$("#detect"),prompt:$("#prompt"),threshold:$("#threshold"),manual:$("#manual-actions"),
   name:$("#manual-name"),generate:$("#generate-mask"),commit:$("#commit-mask"),cancel:$("#cancel-mask")
 }});
+const exportDialog = new ExportDialog($("#export-dialog"), state, state.api, toast);
+$("#export-selected").addEventListener("click", () => exportDialog.open());
 
 action(async()=>{state.setStatus("正在读取项目",true);await state.loadMaps();state.setStatus("准备就绪");});

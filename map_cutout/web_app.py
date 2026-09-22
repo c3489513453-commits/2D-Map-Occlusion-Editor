@@ -17,7 +17,7 @@ from .commands import (
 )
 from .config import AppConfig
 from .domain import BoundingBox, ExportMode, LayerState
-from .exporter import export_layer, unique_windows_name
+from .exporter import BatchExportRequest, BatchExporter, export_layer, unique_windows_name
 from .history import HistoryManager
 from .inference import InferenceService
 from .jobs import JobManager
@@ -304,15 +304,21 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
 
     @app.post("/api/export")
     def export(payload: dict = Body(...)):
-        state = map_state(payload["map_id"])
-        layer = state.layer(payload["layer_id"])
-        repository = DiskMaskRepository(services.project, state.id)
-        destination = Path(payload.get("directory", services.project.root / "exports"))
-        output = unique_windows_name(destination, layer.name)
-        with Image.open(state.source_path) as source:
-            export_layer(source, repository.load(layer.mask_path), output,
-                         ExportMode(payload.get("mode", "tight")))
-        return {"path": str(output)}
+        destination = Path(payload.get("output_dir") or services.project.root / "exports")
+        map_ids = payload.get("map_ids")
+        if not map_ids and payload.get("map_id"):
+            map_ids = [payload["map_id"]]
+        layer_ids = payload.get("layer_ids")
+        if not layer_ids and payload.get("layer_id"):
+            layer_ids = [payload["layer_id"]]
+        report = BatchExporter(services.project.state).export(BatchExportRequest(
+            output_dir=destination, scope=payload.get("scope", "map"), map_ids=map_ids,
+            layer_ids=layer_ids, mode=payload.get("mode", "tight"),
+            include_hidden=bool(payload.get("include_hidden", True)),
+            preserve_folders=bool(payload.get("preserve_folders", False))))
+        return {"exported": [str(path) for path in report.exported],
+                "skipped": report.skipped, "failures": report.failures,
+                "output_dir": str(destination)}
 
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str):

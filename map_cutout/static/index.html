@@ -61,6 +61,15 @@
 
   <footer class="statusbar"><span id="status-dot"></span><span id="status">准备就绪</span><span class="spacer"></span><span>仅在本机运行</span></footer>
   <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="export-dialog">
+    <form method="dialog"><div class="dialog-heading"><h2>导出透明素材</h2><button type="button" data-close aria-label="关闭">×</button></div>
+      <label>导出范围<select name="scope"><option value="selected">选中图层</option><option value="visible">当前地图可见图层</option><option value="all">当前地图全部图层</option><option value="project">整个项目</option></select></label>
+      <fieldset><legend>图片尺寸</legend><label><input type="radio" name="mode" value="tight" checked> 紧凑裁剪（素材多大就导出多大）</label><label><input type="radio" name="mode" value="full_size"> 保持原图尺寸（其余位置透明）</label></fieldset>
+      <label>输出文件夹<input name="output_dir" placeholder="留空则使用项目的 exports 文件夹"></label>
+      <label class="check"><input type="checkbox" name="include_hidden" checked> 包含隐藏图层</label><label class="check"><input type="checkbox" name="preserve_folders"> 保留图层文件夹结构</label>
+      <div class="export-result" hidden></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" class="primary">开始导出</button></div>
+    </form>
+  </dialog>
   <script type="module" src="/static/app.js"></script>
 </body>
 </html>
