@@ -4,6 +4,7 @@
 
 - 使用入口：双击 Windows 下的 `启动工具.bat`
 - 详细说明：[地图抠图工具使用说明](docs/map-cutout-user-guide.md)
+- Cursor 继续开发：[项目交接文档](docs/CURSOR_HANDOFF.md)
 - 默认项目输出位置：`D:\06\剧本\地图抠图\项目输出`
 
 下方保留上游 Grounded SAM 2 项目说明。
