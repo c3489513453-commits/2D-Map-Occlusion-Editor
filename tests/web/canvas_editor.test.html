@@ -1,6 +1,6 @@
 <!doctype html><meta charset="utf-8"><title>RUNNING</title>
 <script type="module">
-import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload,canCloseLasso,lassoCommitPoints} from "/static/canvas_editor.js";
+import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload,canCloseLasso,lassoCommitPoints,CanvasEditor} from "/static/canvas_editor.js";
 try{
  const view={scale:.5,offsetX:100,offsetY:40};
  const p=screenToImage(150,90,view); if(p.x!==100||p.y!==100)throw Error("screenToImage 错误");
@@ -19,6 +19,32 @@ try{
  const committed=lassoCommitPoints(shape,{x:1,y:1},1);
  if(!committed||committed.length!==3||committed[2][0]!==40)throw Error("闭合后应只保留画出的轮廓");
  if(lassoCommitPoints(shape,{x:80,y:80},1))throw Error("没回到起点时不能生成区域");
+ const shell=document.createElement("div");
+ const stage=document.createElement("div");
+ const image=new Image();
+ const board=document.createElement("canvas");
+ document.body.append(shell,stage,image,board);
+ const editor=new CanvasEditor(shell,stage,image,board);
+ const blank=document.createElement("canvas");
+ blank.width=32; blank.height=32;
+ await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(Error("测试图加载失败"));image.src=blank.toDataURL()});
+ const mask=document.createElement("canvas");
+ mask.width=32; mask.height=32;
+ const paint=mask.getContext("2d");
+ paint.fillStyle="#fff";
+ paint.fillRect(2,2,4,4);
+ editor.maskImages.set("layer",mask);
+ editor.editMaskLocally("layer",{shape:"polygon",points:[[10,2],[18,2],[18,8],[10,8]],value:255});
+ editor.editMaskLocally("layer",{shape:"polygon",points:[[10,12],[18,12],[18,18],[10,18]],value:255});
+ editor.editMaskLocally("layer",{points:[[24,8],[24,16]],radius:2,value:255});
+ editor.editMaskLocally("layer",{shape:"polygon",points:[[2,2],[6,2],[6,6],[2,6]],value:0});
+ editor.layers=[{id:"layer",visible:true,mask_path:"mask.png",map_id:"map"}];
+ await editor.loadMasks();
+ const edited=editor.maskCanvases.get("layer").getContext("2d").getImageData(0,0,32,32).data;
+ const lit=(x,y)=>edited[(y*32+x)*4]>200;
+ if(!lit(12,4)||!lit(12,14)||!lit(24,12))throw Error("后画的区域没有留在原来的蒙版上");
+ if(lit(3,3))throw Error("减去的区域还留在蒙版上");
+ if(editor.maskImages.get("layer")!==editor.maskCanvases.get("layer"))throw Error("刷新蒙版时丢掉了正在编辑的选区");
  document.title="PASS";
 }catch(error){document.title="FAIL: "+error.message}
 </script>

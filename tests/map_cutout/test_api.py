@@ -93,6 +93,22 @@ def test_polygon_edit_changes_existing_mask_without_adding_a_layer(tmp_path):
     assert image[0, 0] == 0
     assert client.get(f"/api/maps/{map_state.id}/layers/chair/mask").headers["cache-control"] == "no-store"
 
+    added_again = client.post(
+        f"/api/maps/{map_state.id}/layers/chair/paint",
+        json={"shape": "polygon", "points": [[2, 11], [8, 11], [8, 15], [2, 15]], "value": 255},
+    )
+    assert added_again.status_code == 200
+    brushed = client.post(
+        f"/api/maps/{map_state.id}/layers/chair/paint",
+        json={"points": [[16, 13], [18, 13]], "radius": 2, "value": 255},
+    )
+    assert brushed.status_code == 200
+    image = np.asarray(Image.open(path).convert("L"))
+    assert image[3, 3] == 255
+    assert image[6, 14] == 255
+    assert image[13, 4] == 255
+    assert image[13, 17] == 255
+
     removed = client.post(
         f"/api/maps/{map_state.id}/layers/chair/paint",
         json={"shape": "polygon", "points": [[2, 2], [6, 2], [6, 6], [2, 6]], "value": 0},
@@ -101,6 +117,8 @@ def test_polygon_edit_changes_existing_mask_without_adding_a_layer(tmp_path):
     image = np.asarray(Image.open(path).convert("L"))
     assert image[3, 3] == 0
     assert image[6, 14] == 255
+    assert image[13, 4] == 255
+    assert image[13, 17] == 255
     after = client.get(f"/api/maps/{map_state.id}/layers").json()
     assert [layer["id"] for layer in after] == [layer["id"] for layer in before]
 

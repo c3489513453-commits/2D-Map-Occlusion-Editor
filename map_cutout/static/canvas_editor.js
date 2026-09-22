@@ -61,7 +61,12 @@ export class CanvasEditor extends EventTarget {
     this.maskImages = new Map();
     this.maskOverlays = new Map();
     this.maskVersions = new Map();
+    this.maskCanvases = new Map();
+    this.maskLoading = new Map();
+    this.maskLoadToken = new Map();
+    this.maskGeneration = 0;
     this.maskEditLayerId = null;
+    this.loadedMapId = null;
     image.addEventListener("load", () => this.resize());
     this.bind();
   }
@@ -90,7 +95,82 @@ export class CanvasEditor extends EventTarget {
   invalidateMask(id) {
     this.maskImages.delete(id);
     this.maskOverlays.delete(id);
+    this.maskCanvases.delete(id);
+    this.maskLoadToken.set(id, (this.maskLoadToken.get(id) || 0) + 1);
     this.maskVersions.set(id, (this.maskVersions.get(id) || 0) + 1);
+  }
+
+  forgetLocalMasks() {
+    this.maskGeneration += 1;
+    this.maskCanvases.clear();
+    this.maskImages.clear();
+    this.maskOverlays.clear();
+    this.maskLoading.clear();
+    this.maskLoadToken.clear();
+  }
+
+  dropLocalMask(layerId) {
+    this.maskCanvases.delete(layerId);
+    this.maskImages.delete(layerId);
+    this.maskOverlays.delete(layerId);
+    this.maskLoading.delete(layerId);
+    this.maskLoadToken.set(layerId, (this.maskLoadToken.get(layerId) || 0) + 1);
+    this.maskVersions.set(layerId, (this.maskVersions.get(layerId) || 0) + 1);
+  }
+
+  editableMask(layerId) {
+    const existing = this.maskCanvases.get(layerId);
+    if (existing) return existing;
+    const width = this.image.naturalWidth;
+    const height = this.image.naturalHeight;
+    const current = this.maskImages.get(layerId);
+    if (!width || !height || !current) throw new Error("这张蒙版还没有显示出来，请等它出现后再修改");
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    context.imageSmoothingEnabled = false;
+    context.drawImage(current, 0, 0, width, height);
+    this.maskCanvases.set(layerId, canvas);
+    this.maskImages.set(layerId, canvas);
+    return canvas;
+  }
+
+  editMaskLocally(layerId, stroke) {
+    const canvas = this.editableMask(layerId);
+    this.maskLoadToken.set(layerId, (this.maskLoadToken.get(layerId) || 0) + 1);
+    const context = canvas.getContext("2d");
+    const color = stroke.value ? "#ffffff" : "#000000";
+    context.save();
+    context.fillStyle = color;
+    context.strokeStyle = color;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.globalCompositeOperation = "source-over";
+    const points = stroke.points || [];
+    if (stroke.shape === "polygon" && points.length >= 3) {
+      context.beginPath();
+      context.moveTo(points[0][0], points[0][1]);
+      for (let index = 1; index < points.length; index += 1) context.lineTo(points[index][0], points[index][1]);
+      context.closePath();
+      context.fill();
+    } else if (points.length) {
+      const radius = Number(stroke.radius) || 10;
+      context.lineWidth = radius * 2;
+      context.beginPath();
+      context.moveTo(points[0][0], points[0][1]);
+      for (const point of points) context.lineTo(point[0], point[1]);
+      context.stroke();
+      if (points.length === 1) {
+        context.beginPath();
+        context.arc(points[0][0], points[0][1], radius, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+    context.restore();
+    this.maskImages.set(layerId, canvas);
+    this.maskOverlays.delete(layerId);
+    this.render();
   }
 
   cancelLasso() {
@@ -310,15 +390,38 @@ export class CanvasEditor extends EventTarget {
 
   async loadMasks() {
     const visible = this.layers.filter(layer => layer.visible && layer.mask_path);
-    await Promise.all(visible.map(layer => new Promise(resolve => {
-      if (this.maskImages.has(layer.id)) return resolve();
-      const img = new Image();
-      img.onload = () => { this.maskImages.set(layer.id, img); resolve(); };
-      img.onerror = resolve;
-      const version = this.maskVersions.get(layer.id) || 0;
-      img.src = `/api/maps/${layer.map_id}/layers/${layer.id}/mask?v=${version}`;
-    })));
+    await Promise.all(visible.map(layer => this.loadOneMask(layer)));
     this.render();
+  }
+
+  loadOneMask(layer) {
+    if (this.maskCanvases.has(layer.id)) {
+      this.maskImages.set(layer.id, this.maskCanvases.get(layer.id));
+      return Promise.resolve();
+    }
+    if (this.maskImages.has(layer.id)) return Promise.resolve();
+    const pending = this.maskLoading.get(layer.id);
+    if (pending) return pending;
+    const version = this.maskVersions.get(layer.id) || 0;
+    const generation = this.maskGeneration;
+    const token = this.maskLoadToken.get(layer.id) || 0;
+    const promise = new Promise(resolve => {
+      const img = new Image();
+      img.onload = () => {
+        const currentToken = this.maskLoadToken.get(layer.id) || 0;
+        if (generation !== this.maskGeneration || currentToken !== token || this.maskCanvases.has(layer.id)) {
+          resolve();
+          return;
+        }
+        this.maskImages.set(layer.id, img);
+        this.maskOverlays.delete(layer.id);
+        resolve();
+      };
+      img.onerror = resolve;
+      img.src = `/api/maps/${layer.map_id}/layers/${layer.id}/mask?v=${version}-${generation}-${token}`;
+    }).finally(() => this.maskLoading.delete(layer.id));
+    this.maskLoading.set(layer.id, promise);
+    return promise;
   }
 
   createTintedMask(image, color, opacity) {

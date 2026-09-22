@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -31,7 +32,9 @@ class DiskMaskRepository:
         self.directory.mkdir(parents=True, exist_ok=True)
 
     def load(self, path):
-        return np.asarray(Image.open(path).convert("L")) > 0
+        with Image.open(path) as opened:
+            pixels = np.array(opened.convert("L"), dtype=np.uint8, copy=True)
+        return pixels > 0
 
     def save(self, layer_id, mask):
         path = self.directory / f"{layer_id}.png"
@@ -63,7 +66,10 @@ class _EditMask:
         self.repository, self.path, self.before, self.after = repository, path, before, after
 
     def _write(self, mask):
-        Image.fromarray(to_mask_image(mask), mode="L").save(self.path)
+        target = Path(self.path)
+        temporary = target.with_name(f"{target.stem}.writing.png")
+        Image.fromarray(to_mask_image(mask), mode="L").save(temporary)
+        temporary.replace(target)
 
     def execute(self):
         self._write(self.after)
@@ -79,6 +85,10 @@ class AppServices:
     jobs: JobManager
     histories: HistoryManager | None = None
     previews: dict = field(default_factory=dict)
+    mask_locks: dict = field(default_factory=dict)
+
+    def mask_lock(self, key: str):
+        return self.mask_locks.setdefault(key, threading.Lock())
 
     def __post_init__(self):
         self.histories = self.histories or HistoryManager(limit=50)
@@ -276,20 +286,21 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         if layer.locked:
             raise HTTPException(409, "图层已锁定")
         repository = DiskMaskRepository(services.project, map_id)
-        before = repository.load(layer.mask_path)
-        after = before.copy()
-        points = payload.get("points", [])
-        if payload.get("shape") == "polygon":
-            after = paint_polygon(after, points, int(payload.get("value", 255)))
-        else:
-            for start, end in zip(points, points[1:] or points):
-                distance = max(abs(end[0]-start[0]), abs(end[1]-start[1]), 1)
-                for step in range(int(distance)+1):
-                    ratio = step / distance
-                    after = paint_circle(after, start[0]+(end[0]-start[0])*ratio,
-                                         start[1]+(end[1]-start[1])*ratio,
-                                         float(payload.get("radius", 10)), int(payload.get("value", 255)))
-        history(map_id).execute(_EditMask(repository, layer.mask_path, before, after))
+        with services.mask_lock(f"{map_id}:{layer_id}"):
+            before = repository.load(layer.mask_path)
+            after = before.copy()
+            points = payload.get("points", [])
+            if payload.get("shape") == "polygon":
+                after = paint_polygon(after, points, int(payload.get("value", 255)))
+            else:
+                for start, end in zip(points, points[1:] or points):
+                    distance = max(abs(end[0]-start[0]), abs(end[1]-start[1]), 1)
+                    for step in range(int(distance)+1):
+                        ratio = step / distance
+                        after = paint_circle(after, start[0]+(end[0]-start[0])*ratio,
+                                             start[1]+(end[1]-start[1])*ratio,
+                                             float(payload.get("radius", 10)), int(payload.get("value", 255)))
+            history(map_id).execute(_EditMask(repository, layer.mask_path, before, after))
         services.project.dirty = True
         return {"updated": True}
 

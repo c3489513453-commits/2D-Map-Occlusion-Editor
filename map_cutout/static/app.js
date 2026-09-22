@@ -36,6 +36,10 @@ function renderMaps() {
     <div class="map-card ${map.id === state.currentMapId ? "active" : ""}" data-map-id="${map.id}">
       <img src="/api/maps/${map.id}/image" alt=""><div><strong>${escapeHtml(map.source_path.split(/[\\/]/).pop())}</strong><small>${map.width} × ${map.height}</small></div>
     </div>`).join("");
+  if (editor.loadedMapId !== state.currentMapId) {
+    editor.loadedMapId = state.currentMapId;
+    editor.forgetLocalMasks();
+  }
   editor.setLayers(state.layers.map(layer => ({...layer, map_id: state.currentMapId})));
   if (state.editingLayerId && !state.layers.some(layer => layer.id === state.editingLayerId)) {
     state.editingLayerId = null;
@@ -141,8 +145,8 @@ $("#add-layer").addEventListener("click", () => action(async () => {
   beginMaskEdit(layer.id);
 }));
 $("#merge").addEventListener("click", () => action(async () => { const ids=[...state.selectedLayerIds].filter(id=>state.layers.find(layer=>layer.id===id)?.kind!=="original"); if(ids.length<2)throw new Error("请先选择至少两个蒙版图层"); await state.api.post(`/api/maps/${state.currentMapId}/layers/merge`,{layer_ids:ids}); state.selectedLayerIds.clear(); state.setDirty(true); await state.loadLayers(); }));
-$("#undo").addEventListener("click",()=>action(async()=>{await state.api.post(`/api/maps/${state.currentMapId}/undo`);state.setDirty(true);await state.loadLayers();}));
-$("#redo").addEventListener("click",()=>action(async()=>{await state.api.post(`/api/maps/${state.currentMapId}/redo`);state.setDirty(true);await state.loadLayers();}));
+$("#undo").addEventListener("click",()=>action(async()=>{editor.forgetLocalMasks();await state.api.post(`/api/maps/${state.currentMapId}/undo`);state.setDirty(true);await state.loadLayers();}));
+$("#redo").addEventListener("click",()=>action(async()=>{editor.forgetLocalMasks();await state.api.post(`/api/maps/${state.currentMapId}/redo`);state.setDirty(true);await state.loadLayers();}));
 document.addEventListener("keydown",event=>{if(!(event.ctrlKey||event.metaKey))return;const key=event.key.toLowerCase();if(key==="s"){event.preventDefault();action(()=>state.save());}else if(key==="z"&&!event.shiftKey){event.preventDefault();$("#undo").click();}else if(key==="y"||(key==="z"&&event.shiftKey)){event.preventDefault();$("#redo").click();}});
 document.addEventListener("keydown", event => {
   if (event.target.closest("input, textarea, dialog")) return;
