@@ -1,19 +1,25 @@
 from pathlib import Path
-import socket
 
 from map_cutout.launcher import choose_address
 
 
-def test_launcher_uses_loopback_and_next_free_port():
-    occupied = socket.socket()
-    occupied.bind(("127.0.0.1", 0))
-    port = occupied.getsockname()[1]
-    try:
-        host, selected = choose_address(port, 3)
-        assert host == "127.0.0.1"
-        assert selected == port + 1
-    finally:
-        occupied.close()
+def test_launcher_uses_loopback_and_next_free_port(monkeypatch):
+    attempts = []
+
+    class FakeSocket:
+        def __init__(self, *args): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def bind(self, address):
+            attempts.append(address)
+            if address[1] == 7860:
+                raise OSError("occupied")
+
+    monkeypatch.setattr("map_cutout.launcher.socket.socket", FakeSocket)
+    host, selected = choose_address(7860, 3)
+    assert host == "127.0.0.1"
+    assert selected == 7861
+    assert attempts == [("127.0.0.1", 7860), ("127.0.0.1", 7861)]
 
 
 def test_batch_file_uses_project_local_python():
