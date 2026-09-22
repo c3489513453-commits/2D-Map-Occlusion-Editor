@@ -6,9 +6,10 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from map_cutout.config import AppConfig
+from map_cutout.domain import LayerState
 from map_cutout.jobs import JobManager
 from map_cutout.project_store import ProjectStore
-from map_cutout.web_app import AppServices, create_app
+from map_cutout.web_app import AppServices, DiskMaskRepository, create_app
 
 
 class FakeInference:
@@ -68,6 +69,40 @@ def test_cuda_oom_becomes_chinese_failed_job_without_layers(tmp_path):
     assert job["state"] == "failed"
     assert "显存不足" in job["message"]
     assert after == before
+
+
+def test_polygon_edit_changes_existing_mask_without_adding_a_layer(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    repository = DiskMaskRepository(app_services.project, map_state.id)
+    mask = np.zeros((map_state.height, map_state.width), dtype=np.uint8)
+    mask[2:6, 2:6] = 1
+    path = repository.save("chair", mask)
+    map_state.layers.append(LayerState.mask_layer("chair", "chair1", "chair", path))
+    before = client.get(f"/api/maps/{map_state.id}/layers").json()
+
+    added = client.post(
+        f"/api/maps/{map_state.id}/layers/chair/paint",
+        json={"shape": "polygon", "points": [[10, 2], [20, 2], [20, 10], [10, 10]], "value": 255},
+    )
+    assert added.status_code == 200
+    image = np.asarray(Image.open(path).convert("L"))
+    assert image[3, 3] == 255
+    assert image[6, 14] == 255
+    assert image[0, 0] == 0
+    assert client.get(f"/api/maps/{map_state.id}/layers/chair/mask").headers["cache-control"] == "no-store"
+
+    removed = client.post(
+        f"/api/maps/{map_state.id}/layers/chair/paint",
+        json={"shape": "polygon", "points": [[2, 2], [6, 2], [6, 6], [2, 6]], "value": 0},
+    )
+    assert removed.status_code == 200
+    image = np.asarray(Image.open(path).convert("L"))
+    assert image[3, 3] == 0
+    assert image[6, 14] == 255
+    after = client.get(f"/api/maps/{map_state.id}/layers").json()
+    assert [layer["id"] for layer in after] == [layer["id"] for layer in before]
 
 
 def test_project_save_and_layer_patch(tmp_path):

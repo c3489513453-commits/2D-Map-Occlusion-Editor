@@ -37,6 +37,12 @@
         <div id="canvas-empty" class="canvas-empty"><div class="canvas-symbol">＋</div><h1>导入地图开始抠图</h1><p>识别结果会自动成为独立图层</p></div>
         <div id="canvas-stage" class="canvas-stage" hidden><img id="map-image" alt="当前地图"><canvas id="mask-canvas"></canvas></div>
       </div>
+      <div id="edit-actions" class="manual-actions edit-actions" hidden>
+        <span id="edit-label">正在编辑</span>
+        <button id="close-lasso" class="accent" type="button">闭合套索</button>
+        <button id="cancel-lasso" type="button">取消这一笔</button>
+        <button id="finish-edit" type="button">结束编辑</button>
+      </div>
       <div id="manual-actions" class="manual-actions" hidden>
         <label>图层名称 <input id="manual-name" value="object"></label>
         <button id="generate-mask" class="accent">生成蒙版</button>

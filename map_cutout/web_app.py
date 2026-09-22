@@ -21,7 +21,7 @@ from .exporter import BatchExportRequest, BatchExporter, export_layer, unique_wi
 from .history import HistoryManager
 from .inference import InferenceService
 from .jobs import JobManager
-from .masks import paint_circle, paint_polygon
+from .masks import paint_circle, paint_polygon, to_mask_image
 from .project_store import ProjectStore
 
 
@@ -35,7 +35,7 @@ class DiskMaskRepository:
 
     def save(self, layer_id, mask):
         path = self.directory / f"{layer_id}.png"
-        Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode="L").save(path)
+        Image.fromarray(to_mask_image(mask), mode="L").save(path)
         return str(path)
 
     def delete(self, path):
@@ -63,7 +63,7 @@ class _EditMask:
         self.repository, self.path, self.before, self.after = repository, path, before, after
 
     def _write(self, mask):
-        Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode="L").save(self.path)
+        Image.fromarray(to_mask_image(mask), mode="L").save(self.path)
 
     def execute(self):
         self._write(self.after)
@@ -181,7 +181,11 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         layer = map_state(map_id).layer(layer_id)
         if not layer.mask_path:
             raise HTTPException(404, "此图层没有蒙版")
-        return FileResponse(layer.mask_path, media_type="image/png")
+        return FileResponse(
+            layer.mask_path,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.post("/api/maps/{map_id}/detect")
     def detect(map_id: str, payload: dict = Body(...)):

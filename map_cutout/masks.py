@@ -45,6 +45,17 @@ def paint_polygon(
     return np.asarray(image, dtype=np.uint8).copy()
 
 
+def to_mask_image(mask: np.ndarray) -> np.ndarray:
+    """Store a mask as a grayscale PNG: 0 is outside, 255 is kept.
+
+    Boolean masks load back as 0/1. Painting then writes 255 into the new
+    region. Multiplying that 255 by 255 overflows and becomes almost black,
+    so the edit looks like it did nothing.
+    """
+    kept = (np.asarray(mask) > 0).astype(np.uint8)
+    return kept * np.uint8(255)
+
+
 def mask_bounds(mask: np.ndarray) -> BoundingBox:
     ys, xs = np.nonzero(mask)
     if not len(xs):

@@ -7,6 +7,7 @@ from map_cutout.masks import (
     mask_bounds,
     paint_circle,
     paint_polygon,
+    to_mask_image,
     union_masks,
 )
 
@@ -43,3 +44,15 @@ def test_polygon_can_add_and_remove_a_closed_region():
     assert added[0, 0] == 0
     assert removed[5, 5] == 0
     assert removed[3, 3] == 255
+
+
+def test_painted_white_pixels_stay_white_when_saved():
+    mask = np.zeros((8, 8), dtype=np.uint8)
+    mask[1:3, 1:3] = 1
+    painted = paint_polygon(mask, [(4, 1), (7, 1), (7, 4), (4, 4)], 255)
+    image = to_mask_image(painted)
+
+    assert image[2, 2] == 255
+    assert image[2, 5] == 255
+    assert image[0, 0] == 0
+    assert int(image.max()) == 255

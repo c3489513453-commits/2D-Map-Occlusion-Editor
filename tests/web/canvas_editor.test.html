@@ -1,6 +1,6 @@
 <!doctype html><meta charset="utf-8"><title>RUNNING</title>
 <script type="module">
-import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload} from "/static/canvas_editor.js";
+import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload,canCloseLasso} from "/static/canvas_editor.js";
 try{
  const view={scale:.5,offsetX:100,offsetY:40};
  const p=screenToImage(150,90,view); if(p.x!==100||p.y!==100)throw Error("screenToImage 错误");
@@ -11,6 +11,11 @@ try{
  const add=lassoPayload([[1,2],[7,2],[7,8]],"lasso-add");
  const subtract=lassoPayload([[1,2],[7,2],[7,8]],"lasso-subtract");
  if(add.shape!=="polygon"||add.value!==255||subtract.value!==0)throw Error("套索提交数据错误");
+ const open=[{x:0,y:0},{x:30,y:0}];
+ if(canCloseLasso(open,{x:0,y:0},1))throw Error("点数不够时不应闭合");
+ const shape=[{x:0,y:0},{x:40,y:0},{x:40,y:40}];
+ if(canCloseLasso(shape,{x:80,y:80},1))throw Error("离起点远时不应闭合");
+ if(!canCloseLasso(shape,{x:2,y:2},1))throw Error("回到起点时应允许闭合");
  document.title="PASS";
 }catch(error){document.title="FAIL: "+error.message}
 </script>

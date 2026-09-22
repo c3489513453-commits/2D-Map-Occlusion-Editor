@@ -9,5 +9,22 @@ export class InferenceControls{
  async commit(){if(!this.previewId)return;const layer=await this.api.post(`/api/maps/${this.state.currentMapId}/segment/commit`,{preview_id:this.previewId,name:this.el.name.value.trim()||"object"});this.state.selectedLayerIds=new Set([layer.id]);this.state.setDirty(true);await this.state.loadLayers();this.clear();this.state.setStatus("新图层已建立")}
  async cancel(){if(this.previewId)await this.api.delete(`/api/previews/${this.previewId}`);this.clear();this.state.setStatus("已取消手动分割")}
  clear(){this.pending=null;this.previewId=null;this.el.manual.hidden=true;this.editor.setPreview(null);this.editor.points=[];this.editor.render()}
- async paint(stroke){if(this.state.selectedLayerIds.size!==1)throw Error("请先选择一个蒙版图层进行修改");const id=[...this.state.selectedLayerIds][0],layer=this.state.layers.find(item=>item.id===id);if(!layer||!layer.mask_path)throw Error("请先选择一个蒙版图层");await this.api.post(`/api/maps/${this.state.currentMapId}/layers/${id}/paint`,stroke);this.editor.maskImages.delete(id);this.editor.maskOverlays.delete(id);this.state.setDirty(true);await this.state.loadLayers();this.state.setStatus(stroke.shape==="polygon"?"套索区域已应用":"蒙版已修改")}
+ async paint(stroke){
+  const id=this.state.editingLayerId;
+  try{
+    if(!id)throw Error("请先在右侧蒙版图层上点击「继续编辑」");
+    const layer=this.state.layers.find(item=>item.id===id);
+    if(!layer||!layer.mask_path)throw Error("请先选择一张已有蒙版");
+    if(layer.locked)throw Error("这个图层已锁定，请先点最右边的锁解锁");
+    await this.api.post(`/api/maps/${this.state.currentMapId}/layers/${id}/paint`,stroke);
+    this.editor.invalidateMask(id);
+    this.editor.cancelLasso();
+    this.state.setDirty(true);
+    await this.state.loadLayers();
+    this.state.setStatus(stroke.shape==="polygon"?`已改好「${layer.name}」，没有新建图层`:"蒙版已修改");
+  }catch(error){
+    if(this.editor.lasso)this.editor.lasso.committing=false;
+    throw error;
+  }
+ }
 }
