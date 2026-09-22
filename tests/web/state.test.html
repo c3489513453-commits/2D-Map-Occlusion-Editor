@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><title>RUNNING</title>
+<script type="module">
+import {AppState} from "/static/state.js";
+try {
+  const api={post:async()=>({saved:true})}; const state=new AppState(api);
+  state.layers=[{id:"original",kind:"original"},{id:"a",kind:"mask"},{id:"b",kind:"mask"}];
+  if(state.orderedLayers().at(-1).kind!=="original") throw new Error("原始图层未在底部");
+  state.setDirty(true); const event={preventDefault(){this.prevented=true}};
+  if(!state.beforeUnload(event)||!event.prevented) throw new Error("未保存提示无效");
+  await state.save(); if(state.dirty) throw new Error("保存后仍为 dirty");
+  document.title="PASS";
+} catch(error) { document.title="FAIL: "+error.message; }
+</script>

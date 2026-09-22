@@ -7,6 +7,7 @@ from uuid import uuid4
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from .commands import (
@@ -248,4 +249,17 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         except KeyError:
             raise HTTPException(404, "任务不存在")
 
+    static_dir = Path(__file__).with_name("static")
+    tests_dir = Path(__file__).resolve().parents[1] / "tests"
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    if tests_dir.exists():
+        app.mount("/tests", StaticFiles(directory=tests_dir, html=True), name="tests")
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="site")
     return app
+
+
+def create_test_app() -> FastAPI:
+    import tempfile
+    root = Path(tempfile.gettempdir()) / "map-cutout-web-test"
+    services = AppServices(ProjectStore.create(root, "test"), object(), JobManager(1))
+    return create_app(AppConfig(project_root=root), services)
