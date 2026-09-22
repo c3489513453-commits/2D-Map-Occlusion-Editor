@@ -98,6 +98,37 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
     app = FastAPI(title="地图抠图工具")
     app.state.services = services
 
+    @app.get("/api/health")
+    def health():
+        try:
+            import torch
+            cuda = bool(torch.cuda.is_available())
+        except Exception:
+            cuda = False
+        return {"status": "ok", "cuda": cuda}
+
+    @app.get("/api/dialog/image")
+    def choose_image():
+        from tkinter import Tk, filedialog
+        root = Tk(); root.withdraw(); root.attributes("-topmost", True)
+        try:
+            path = filedialog.askopenfilename(
+                title="选择地图图片",
+                filetypes=[("地图图片", "*.png *.jpg *.jpeg"), ("所有文件", "*.*")])
+        finally:
+            root.destroy()
+        return {"path": path or None}
+
+    @app.get("/api/dialog/folder")
+    def choose_folder(title: str = "选择文件夹"):
+        from tkinter import Tk, filedialog
+        root = Tk(); root.withdraw(); root.attributes("-topmost", True)
+        try:
+            path = filedialog.askdirectory(title=title)
+        finally:
+            root.destroy()
+        return {"path": path or None}
+
     def map_state(map_id):
         try:
             return services.project.state.map_by_id(map_id)

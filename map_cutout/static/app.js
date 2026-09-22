@@ -73,6 +73,10 @@ state.addEventListener("change", render);
 window.addEventListener("beforeunload", event => state.beforeUnload(event));
 $("#map-list").addEventListener("click", event => { const card=event.target.closest("[data-map-id]"); if(card) action(()=>state.selectMap(card.dataset.mapId)); });
 $("#save").addEventListener("click",()=>action(()=>state.save()));
+$("#new-project").addEventListener("click",()=>action(async()=>{const {path}=await state.api.get("/api/dialog/folder?title=选择项目保存文件夹");if(!path)return;const name=prompt("项目名称",path.split(/[\\/]/).pop()||"地图项目");if(!name)return;await state.api.post("/api/projects/new",{path,name});state.maps=[];state.currentMapId=null;state.layers=[];state.setDirty(true);state.emit();}));
+$("#open-project").addEventListener("click",()=>action(async()=>{const {path}=await state.api.get("/api/dialog/folder?title=选择已有项目文件夹");if(!path)return;await state.api.post("/api/projects/open",{path});state.maps=[];state.currentMapId=null;await state.loadMaps();state.setDirty(false);state.setStatus("项目已打开");}));
+$("#import-image").addEventListener("click",()=>action(async()=>{const {path}=await state.api.get("/api/dialog/image");if(!path)return;const map=await state.api.post("/api/import/image",{path});state.currentMapId=map.id;await state.loadMaps();state.setDirty(true);state.setStatus("地图已导入");}));
+$("#import-folder").addEventListener("click",()=>action(async()=>{const {path}=await state.api.get("/api/dialog/folder?title=选择地图文件夹");if(!path)return;const maps=await state.api.post("/api/import/folder",{path});await state.loadMaps();if(maps.length)await state.selectMap(maps[0].id);state.setDirty(true);state.setStatus(`已导入 ${maps.length} 张地图`);}));
 document.querySelectorAll("[data-tool]").forEach(button => button.addEventListener("click", () => {
   document.querySelectorAll("[data-tool]").forEach(item => item.classList.remove("active"));
   button.classList.add("active"); editor.setTool(button.dataset.tool);

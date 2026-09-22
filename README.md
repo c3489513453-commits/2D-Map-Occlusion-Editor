@@ -1,3 +1,13 @@
+# 本地地图抠图工具
+
+本仓库已增加面向 2D 游戏地图的中文本地工具：Grounded DINO 按提示词识别目标，SAM 2 生成蒙版，并可手动框选、点选、修整、分图层和导出透明 PNG。
+
+- 使用入口：双击 Windows 下的 `启动工具.bat`
+- 详细说明：[地图抠图工具使用说明](docs/map-cutout-user-guide.md)
+- 默认项目输出位置：`D:\06\剧本\地图抠图\项目输出`
+
+下方保留上游 Grounded SAM 2 项目说明。
+
 # Grounded SAM 2: Ground and Track Anything in Videos
 
 **[IDEA-Research](https://github.com/idea-research)**
