@@ -2,7 +2,13 @@ import numpy as np
 import pytest
 
 from map_cutout.domain import BoundingBox
-from map_cutout.masks import EmptyMaskError, mask_bounds, paint_circle, union_masks
+from map_cutout.masks import (
+    EmptyMaskError,
+    mask_bounds,
+    paint_circle,
+    paint_polygon,
+    union_masks,
+)
 
 
 def test_paint_and_erase_are_clipped_to_image_bounds():
@@ -26,3 +32,14 @@ def test_union_and_bounds_use_exclusive_bottom_right():
 def test_empty_mask_has_explicit_error():
     with pytest.raises(EmptyMaskError):
         mask_bounds(np.zeros((3, 3), dtype=np.uint8))
+
+
+def test_polygon_can_add_and_remove_a_closed_region():
+    mask = np.zeros((12, 12), dtype=np.uint8)
+    added = paint_polygon(mask, [(2, 2), (9, 2), (9, 9), (2, 9)], 255)
+    removed = paint_polygon(added, [(4, 4), (7, 4), (7, 7), (4, 7)], 0)
+
+    assert added[3, 3] == 255
+    assert added[0, 0] == 0
+    assert removed[5, 5] == 0
+    assert removed[3, 3] == 255

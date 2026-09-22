@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from PIL import Image, ImageDraw
 
 from .domain import BoundingBox
 
@@ -32,6 +33,16 @@ def paint_circle(
     patch = result[y1:y2, x1:x2]
     patch[circle] = np.uint8(value)
     return result
+
+
+def paint_polygon(
+    mask: np.ndarray, points: list[tuple[float, float]], value: int
+) -> np.ndarray:
+    if len(points) < 3:
+        raise ValueError("套索至少需要三个点")
+    image = Image.fromarray(mask.astype(np.uint8, copy=True), mode="L")
+    ImageDraw.Draw(image).polygon(points, fill=int(value))
+    return np.asarray(image, dtype=np.uint8).copy()
 
 
 def mask_bounds(mask: np.ndarray) -> BoundingBox:

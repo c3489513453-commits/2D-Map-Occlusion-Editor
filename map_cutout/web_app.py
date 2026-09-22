@@ -21,7 +21,7 @@ from .exporter import BatchExportRequest, BatchExporter, export_layer, unique_wi
 from .history import HistoryManager
 from .inference import InferenceService
 from .jobs import JobManager
-from .masks import paint_circle
+from .masks import paint_circle, paint_polygon
 from .project_store import ProjectStore
 
 
@@ -275,13 +275,16 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         before = repository.load(layer.mask_path)
         after = before.copy()
         points = payload.get("points", [])
-        for start, end in zip(points, points[1:] or points):
-            distance = max(abs(end[0]-start[0]), abs(end[1]-start[1]), 1)
-            for step in range(int(distance)+1):
-                ratio = step / distance
-                after = paint_circle(after, start[0]+(end[0]-start[0])*ratio,
-                                     start[1]+(end[1]-start[1])*ratio,
-                                     float(payload.get("radius", 10)), int(payload.get("value", 255)))
+        if payload.get("shape") == "polygon":
+            after = paint_polygon(after, points, int(payload.get("value", 255)))
+        else:
+            for start, end in zip(points, points[1:] or points):
+                distance = max(abs(end[0]-start[0]), abs(end[1]-start[1]), 1)
+                for step in range(int(distance)+1):
+                    ratio = step / distance
+                    after = paint_circle(after, start[0]+(end[0]-start[0])*ratio,
+                                         start[1]+(end[1]-start[1])*ratio,
+                                         float(payload.get("radius", 10)), int(payload.get("value", 255)))
         history(map_id).execute(_EditMask(repository, layer.mask_path, before, after))
         services.project.dirty = True
         return {"updated": True}
