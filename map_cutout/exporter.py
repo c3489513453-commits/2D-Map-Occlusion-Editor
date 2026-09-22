@@ -47,7 +47,8 @@ def export_layer(
     if mask.shape != (source.height, source.width):
         raise ValueError("蒙版尺寸与源图片不一致")
     rgba = source.convert("RGBA")
-    rgba.putalpha(Image.fromarray(mask.astype(np.uint8), mode="L"))
+    alpha = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    rgba.putalpha(Image.fromarray(alpha, mode="L"))
     if mode is ExportMode.TIGHT:
         box = mask_bounds(mask)
         rgba = rgba.crop((box.x1, box.y1, box.x2, box.y2))

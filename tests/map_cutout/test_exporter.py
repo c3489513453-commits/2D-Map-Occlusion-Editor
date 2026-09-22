@@ -31,5 +31,13 @@ def test_illegal_and_duplicate_names_never_overwrite(tmp_path):
     assert second.name == "chair_1_2.png"
 
 
+def test_boolean_mask_exports_fully_opaque_foreground(tmp_path):
+    image = Image.new("RGB", (4, 4), "red")
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[1:3, 1:3] = True
+    output = export_layer(image, mask, tmp_path / "bool.png", ExportMode.FULL_SIZE)
+    assert Image.open(output).getchannel("A").getextrema() == (0, 255)
+
+
 def test_reserved_windows_name_is_made_safe(tmp_path):
     assert unique_windows_name(tmp_path, "CON", ".png").name == "_CON.png"
