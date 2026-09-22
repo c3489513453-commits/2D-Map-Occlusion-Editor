@@ -322,6 +322,18 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         services.project.dirty = True
         return asdict(layer)
 
+    @app.post("/api/maps/{map_id}/layers")
+    def create_layer(map_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        layer_id = uuid4().hex
+        name = state.unique_layer_name(str(payload.get("name") or "新图层"))
+        repository = DiskMaskRepository(services.project, map_id)
+        mask = np.zeros((state.height, state.width), dtype=np.uint8)
+        layer = LayerState.mask_layer(layer_id, name, name, repository.save(layer_id, mask))
+        history(map_id).execute(CreateLayerCommand(state, layer, index=0))
+        services.project.dirty = True
+        return asdict(layer)
+
     @app.post("/api/maps/{map_id}/folders")
     def create_folder(map_id: str, payload: dict = Body(...)):
         folder = history(map_id).execute(CreateFolderCommand(map_state(map_id), payload["name"]))

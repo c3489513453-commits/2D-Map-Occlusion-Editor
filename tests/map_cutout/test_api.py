@@ -105,6 +105,35 @@ def test_polygon_edit_changes_existing_mask_without_adding_a_layer(tmp_path):
     assert [layer["id"] for layer in after] == [layer["id"] for layer in before]
 
 
+def test_new_named_layer_starts_empty_and_lasso_adds_only_its_interior(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    before = client.get(f"/api/maps/{map_state.id}/layers").json()
+
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={"name": "城门"}).json()
+    assert created["name"] == "城门"
+    assert created["kind"] == "mask"
+    mask = np.asarray(Image.open(created["mask_path"]).convert("L"))
+    assert mask.shape == (map_state.height, map_state.width)
+    assert int(mask.max()) == 0
+
+    painted = client.post(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/paint",
+        json={"shape": "polygon", "points": [[2, 2], [10, 2], [10, 8], [2, 8]], "value": 255},
+    )
+    assert painted.status_code == 200
+    mask = np.asarray(Image.open(created["mask_path"]).convert("L"))
+    assert mask[4, 5] == 255
+    assert mask[0, 0] == 0
+
+    duplicate = client.post(f"/api/maps/{map_state.id}/layers", json={"name": "城门"}).json()
+    assert duplicate["name"] == "城门2"
+    after = client.get(f"/api/maps/{map_state.id}/layers").json()
+    assert len(after) == len(before) + 2
+    assert after[0]["id"] == duplicate["id"]
+
+
 def test_project_save_and_layer_patch(tmp_path):
     app_services = services(tmp_path)
     client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))

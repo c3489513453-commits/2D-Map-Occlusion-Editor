@@ -71,6 +71,16 @@ class MapState:
         ]
         return f"{prefix}{max(numbers, default=0) + 1}"
 
+    def unique_layer_name(self, name: str) -> str:
+        cleaned = " ".join(name.split()) or "新图层"
+        existing = {layer.name for layer in self.layers}
+        if cleaned not in existing:
+            return cleaned
+        number = 2
+        while f"{cleaned}{number}" in existing:
+            number += 1
+        return f"{cleaned}{number}"
+
     def layer(self, layer_id: str) -> LayerState:
         for layer in self.layers:
             if layer.id == layer_id:

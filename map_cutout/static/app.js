@@ -109,7 +109,7 @@ function beginMaskEdit(id) {
   state.selectedLayerIds = new Set([id]);
   editor.setMaskEdit(id);
   activateTool("lasso-add");
-  state.setStatus(`正在编辑「${layer.name}」。沿着要改的边缘画，回到起点、双击，或点「闭合套索」。只会改这张蒙版，不会新建图层。`);
+  state.setStatus(`正在编辑「${layer.name}」。沿着边缘画一圈，画回到发亮的起点。围住的里面才会加进来或减掉。`);
 }
 function finishMaskEdit() {
   state.editingLayerId = null;
@@ -119,7 +119,7 @@ function finishMaskEdit() {
   state.setStatus("已结束编辑");
 }
 function closeOpenLasso() {
-  if (!editor.closeLasso()) toast("再多画一点，至少三个点，形状才会封上。");
+  if (!editor.closeLasso()) toast("请把线画回到起点。只有围住的里面才会成为区域。");
 }
 document.querySelectorAll("[data-tool]").forEach(button => button.addEventListener("click", () => activateTool(button.dataset.tool)));
 $("#close-lasso").addEventListener("click", closeOpenLasso);
@@ -131,6 +131,15 @@ editor.addEventListener("need-edit", () => toast("请先在右侧蒙版图层上
 $("#zoom-in").addEventListener("click", () => editor.setZoom(editor.view.scale * 1.2));
 $("#zoom-out").addEventListener("click", () => editor.setZoom(editor.view.scale / 1.2));
 $("#add-folder").addEventListener("click", () => action(async () => { const name=prompt("文件夹名称","新文件夹"); if(!name)return; const folder=await state.api.post(`/api/maps/${state.currentMapId}/folders`,{name}); state.folders.push(folder); state.setDirty(true); state.emit(); }));
+$("#add-layer").addEventListener("click", () => action(async () => {
+  if (!state.currentMapId) throw new Error("请先导入地图");
+  const name = prompt("图层名称", "新图层");
+  if (!name || !name.trim()) return;
+  const layer = await state.api.post(`/api/maps/${state.currentMapId}/layers`, {name: name.trim()});
+  state.setDirty(true);
+  await state.loadLayers();
+  beginMaskEdit(layer.id);
+}));
 $("#merge").addEventListener("click", () => action(async () => { const ids=[...state.selectedLayerIds].filter(id=>state.layers.find(layer=>layer.id===id)?.kind!=="original"); if(ids.length<2)throw new Error("请先选择至少两个蒙版图层"); await state.api.post(`/api/maps/${state.currentMapId}/layers/merge`,{layer_ids:ids}); state.selectedLayerIds.clear(); state.setDirty(true); await state.loadLayers(); }));
 $("#undo").addEventListener("click",()=>action(async()=>{await state.api.post(`/api/maps/${state.currentMapId}/undo`);state.setDirty(true);await state.loadLayers();}));
 $("#redo").addEventListener("click",()=>action(async()=>{await state.api.post(`/api/maps/${state.currentMapId}/redo`);state.setDirty(true);await state.loadLayers();}));

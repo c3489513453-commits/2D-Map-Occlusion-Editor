@@ -34,6 +34,11 @@ export function canCloseLasso(points, point, scale, threshold = 14) {
   return Math.hypot(dx, dy) <= threshold;
 }
 
+export function lassoCommitPoints(points, closingPoint, scale, threshold = 14) {
+  if (!canCloseLasso(points, closingPoint, scale, threshold)) return null;
+  return points.map(point => [point.x, point.y]);
+}
+
 const LASSO_TOOLS = ["lasso-add", "lasso-subtract"];
 const EDIT_TOOLS = ["brush", "eraser", ...LASSO_TOOLS];
 
@@ -93,12 +98,22 @@ export class CanvasEditor extends EventTarget {
     this.render();
   }
 
-  closeLasso() {
-    if (!this.lasso || this.lasso.points.length < 3 || this.lasso.committing) return false;
+  displayedScale() {
+    const width = this.image.naturalWidth;
+    const rect = this.canvas.getBoundingClientRect();
+    if (!width || !rect.width) return this.view.scale || 1;
+    return rect.width / width;
+  }
+
+  closeLasso(closingPoint) {
+    if (!this.lasso || this.lasso.committing) return false;
+    const last = this.lasso.points[this.lasso.points.length - 1];
+    const scale = this.displayedScale();
+    const committed = lassoCommitPoints(this.lasso.points, closingPoint || last, scale);
+    if (!committed) return false;
     this.lasso.committing = true;
     this.lasso.drawing = false;
-    const detail = lassoPayload(this.lasso.points.map(point => [point.x, point.y]), this.lasso.tool);
-    this.dispatchEvent(new CustomEvent("stroke", {detail}));
+    this.dispatchEvent(new CustomEvent("stroke", {detail: lassoPayload(committed, this.lasso.tool)}));
     return true;
   }
 
@@ -164,8 +179,14 @@ export class CanvasEditor extends EventTarget {
   }
 
   local(event) {
-    const r = this.shell.getBoundingClientRect();
-    return screenToImage(event.clientX - r.left, event.clientY - r.top, this.view);
+    const rect = this.canvas.getBoundingClientRect();
+    const width = this.image.naturalWidth;
+    const height = this.image.naturalHeight;
+    if (!rect.width || !rect.height || !width || !height) return {x: 0, y: 0};
+    return {
+      x: (event.clientX - rect.left) / rect.width * width,
+      y: (event.clientY - rect.top) / rect.height * height,
+    };
   }
 
   bind() {
@@ -227,8 +248,8 @@ export class CanvasEditor extends EventTarget {
     } else if (LASSO_TOOLS.includes(this.tool)) {
       const point = this.local(event);
       if (this.lasso?.committing) return;
-      if (this.lasso && canCloseLasso(this.lasso.points, point, this.view.scale)) {
-        this.closeLasso();
+      if (this.lasso && canCloseLasso(this.lasso.points, point, this.displayedScale())) {
+        this.closeLasso(point);
         return;
       }
       if (!this.lasso) this.lasso = {tool: this.tool, points: [], drawing: false, cursor: point, committing: false};
@@ -263,7 +284,7 @@ export class CanvasEditor extends EventTarget {
     if (this.lasso?.drawing) {
       this.lasso.drawing = false;
       const point = event ? this.local(event) : this.lasso.cursor;
-      if (point && canCloseLasso(this.lasso.points, point, this.view.scale)) this.closeLasso();
+      if (point && canCloseLasso(this.lasso.points, point, this.displayedScale())) this.closeLasso(point);
       else this.render();
       return;
     }
@@ -371,15 +392,21 @@ export class CanvasEditor extends EventTarget {
     const pts = this.lasso.points;
     const adding = this.lasso.tool === "lasso-add";
     const color = adding ? "#63d5e6" : "#ff7a8a";
+    const scale = this.displayedScale();
+    const near = Boolean(this.lasso.cursor && canCloseLasso(pts, this.lasso.cursor, scale));
     c.beginPath();
     c.moveTo(pts[0].x, pts[0].y);
     for (let index = 1; index < pts.length; index += 1) c.lineTo(pts[index].x, pts[index].y);
-    if (this.lasso.cursor) c.lineTo(this.lasso.cursor.x, this.lasso.cursor.y);
+    if (!near && this.lasso.cursor) c.lineTo(this.lasso.cursor.x, this.lasso.cursor.y);
+    if (near) c.closePath();
     c.lineWidth = 2 / this.view.scale;
     c.strokeStyle = color;
+    if (near) {
+      c.fillStyle = adding ? "#63d5e655" : "#ff7a8a55";
+      c.fill();
+    }
     c.stroke();
     const start = pts[0];
-    const near = Boolean(this.lasso.cursor && canCloseLasso(pts, this.lasso.cursor, this.view.scale));
     c.beginPath();
     c.arc(start.x, start.y, (near ? 9 : 5) / this.view.scale, 0, Math.PI * 2);
     c.fillStyle = near ? color : "#ffffff";
@@ -389,7 +416,7 @@ export class CanvasEditor extends EventTarget {
       c.font = `${14 / this.view.scale}px "Microsoft YaHei UI", sans-serif`;
       c.textAlign = "left";
       c.textBaseline = "bottom";
-      c.fillText("点击闭合", start.x + 12 / this.view.scale, start.y);
+      c.fillText(adding ? "点击增加这块" : "点击减去这块", start.x + 12 / this.view.scale, start.y);
     }
   }
 }
