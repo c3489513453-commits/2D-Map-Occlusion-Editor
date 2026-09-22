@@ -62,6 +62,11 @@ EXTRA_PACKAGES = {
         "opencv-python>=4.7.0",
         "submitit>=1.5.1",
     ],
+    "map-cutout-web": [
+        "fastapi>=0.115,<1",
+        "uvicorn[standard]>=0.30,<1",
+        "python-multipart>=0.0.12,<1",
+    ],
 }
 
 # By default, we also build the SAM 2 CUDA extension.
