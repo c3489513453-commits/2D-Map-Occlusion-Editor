@@ -6,6 +6,11 @@ export class CanvasEditor extends EventTarget{
  setTool(tool){this.tool=tool;this.points=[];this.render()}
  setLayers(layers){this.layers=layers;this.loadMasks()}
  setLocked(locked){this.locked=locked}
+ async setPreview(url){
+  if(!url){this.previewImage=null;this.render();return}
+  this.previewImage=await new Promise(resolve=>{const image=new Image();image.onload=()=>resolve(image);image.onerror=()=>resolve(null);image.src=url});
+  if(this.previewImage){const c=this.context,w=this.image.naturalWidth,h=this.image.naturalHeight;c.save();c.globalAlpha=.55;c.drawImage(this.previewImage,0,0,w,h);c.globalCompositeOperation="source-in";c.fillStyle="#f0b85b";c.fillRect(0,0,w,h);c.restore()}
+ }
  setZoom(scale,anchor={x:this.shell.clientWidth/2,y:this.shell.clientHeight/2}){const before=screenToImage(anchor.x,anchor.y,this.view);this.view.scale=Math.max(.1,Math.min(4,scale));this.view.offsetX=anchor.x-before.x*this.view.scale;this.view.offsetY=anchor.y-before.y*this.view.scale;this.applyView()}
  resize(){const dpr=devicePixelRatio||1,w=this.image.naturalWidth,h=this.image.naturalHeight;if(!w||!h)return;this.canvas.width=w*dpr;this.canvas.height=h*dpr;this.canvas.style.width=`${w}px`;this.canvas.style.height=`${h}px`;this.context.setTransform(dpr,0,0,dpr,0,0);this.stage.style.width=`${w}px`;this.stage.style.height=`${h}px`;this.image.style.width=`${w}px`;this.image.style.height=`${h}px`;this.fit();this.render()}
  fit(){const s=Math.min((this.shell.clientWidth-56)/this.image.naturalWidth,(this.shell.clientHeight-56)/this.image.naturalHeight,1);this.view.scale=Math.max(.1,s);this.view.offsetX=(this.shell.clientWidth-this.image.naturalWidth*this.view.scale)/2;this.view.offsetY=(this.shell.clientHeight-this.image.naturalHeight*this.view.scale)/2;this.applyView()}

@@ -1,6 +1,7 @@
 import { AppState, ApiClient } from "/static/state.js";
 import { CanvasEditor } from "/static/canvas_editor.js";
 import { LayerTree } from "/static/layer_tree.js";
+import { InferenceControls } from "/static/inference_controls.js";
 
 const state = new AppState(new ApiClient());
 const $ = selector => document.querySelector(selector);
@@ -77,9 +78,6 @@ document.querySelectorAll("[data-tool]").forEach(button => button.addEventListen
 }));
 editor.addEventListener("viewchange", event => $("#zoom-label").textContent = `${Math.round(event.detail.scale * 100)}%`);
 editor.addEventListener("locked", () => toast("这个图层已锁定，请先点击右侧锁按钮解锁"));
-editor.addEventListener("box", event => action(() => submitSegment({box:event.detail,name:"object"})));
-editor.addEventListener("points", event => state.setStatus(`已添加 ${event.detail.points.length} 个提示点`));
-editor.addEventListener("stroke", () => state.setStatus("画笔修改待提交"));
 $("#zoom-in").addEventListener("click", () => editor.setZoom(editor.view.scale * 1.2));
 $("#zoom-out").addEventListener("click", () => editor.setZoom(editor.view.scale / 1.2));
 $("#add-folder").addEventListener("click", () => action(async () => { const name=prompt("文件夹名称","新文件夹"); if(!name)return; const folder=await state.api.post(`/api/maps/${state.currentMapId}/folders`,{name}); state.folders.push(folder); state.setDirty(true); state.emit(); }));
@@ -87,5 +85,10 @@ $("#merge").addEventListener("click", () => action(async () => { const ids=[...s
 $("#undo").addEventListener("click",()=>action(async()=>{await state.api.post(`/api/maps/${state.currentMapId}/undo`);state.setDirty(true);await state.loadLayers();}));
 $("#redo").addEventListener("click",()=>action(async()=>{await state.api.post(`/api/maps/${state.currentMapId}/redo`);state.setDirty(true);await state.loadLayers();}));
 document.addEventListener("keydown",event=>{if(!(event.ctrlKey||event.metaKey))return;const key=event.key.toLowerCase();if(key==="s"){event.preventDefault();action(()=>state.save());}else if(key==="z"&&!event.shiftKey){event.preventDefault();$("#undo").click();}else if(key==="y"||(key==="z"&&event.shiftKey)){event.preventDefault();$("#redo").click();}});
+
+new InferenceControls({state,editor,api:state.api,toast,elements:{
+  detect:$("#detect"),prompt:$("#prompt"),threshold:$("#threshold"),manual:$("#manual-actions"),
+  name:$("#manual-name"),generate:$("#generate-mask"),commit:$("#commit-mask"),cancel:$("#cancel-mask")
+}});
 
 action(async()=>{state.setStatus("正在读取项目",true);await state.loadMaps();state.setStatus("准备就绪");});

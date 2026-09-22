@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,6 +21,7 @@ from .exporter import export_layer, unique_windows_name
 from .history import HistoryManager
 from .inference import InferenceService
 from .jobs import JobManager
+from .masks import paint_circle
 from .project_store import ProjectStore
 
 
@@ -57,12 +58,27 @@ class _BatchCreate:
                 self.state.layers.remove(layer)
 
 
+class _EditMask:
+    def __init__(self, repository, path, before, after):
+        self.repository, self.path, self.before, self.after = repository, path, before, after
+
+    def _write(self, mask):
+        Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode="L").save(self.path)
+
+    def execute(self):
+        self._write(self.after)
+
+    def undo(self):
+        self._write(self.before)
+
+
 @dataclass
 class AppServices:
     project: ProjectStore
     inference: object
     jobs: JobManager
     histories: HistoryManager | None = None
+    previews: dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.histories = self.histories or HistoryManager(limit=50)
@@ -147,11 +163,18 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
                                                 float(payload.get("threshold", .4)))
             repository = DiskMaskRepository(services.project, map_id)
             created = []
+            reserved_names = {layer.name for layer in state.layers}
             for result in results:
                 layer_id = uuid4().hex
                 path = repository.save(layer_id, result.mask)
+                prefix = (result.class_name.strip().lower().replace(" ", "_") or "object")
+                number = 1
+                while f"{prefix}{number}" in reserved_names:
+                    number += 1
+                name = f"{prefix}{number}"
+                reserved_names.add(name)
                 created.append(LayerState.mask_layer(
-                    layer_id, state.next_layer_name(result.class_name), result.class_name, path))
+                    layer_id, name, result.class_name, path))
             history(map_id).execute(_BatchCreate(state, created))
             services.project.dirty = bool(created) or services.project.dirty
             return [asdict(layer) for layer in created]
@@ -171,15 +194,66 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
                 box = BoundingBox(*payload["context_box"]) if payload.get("context_box") else None
                 mask = services.inference.segment_points(
                     image, payload["points"], payload["labels"], box)
-            layer_id = uuid4().hex
-            repository = DiskMaskRepository(services.project, map_id)
-            layer = LayerState.mask_layer(layer_id, state.next_layer_name(payload.get("name", "object")),
-                                          payload.get("name", "object"), repository.save(layer_id, mask))
-            history(map_id).execute(CreateLayerCommand(state, layer))
-            services.project.dirty = True
-            return asdict(layer)
+            preview_id = uuid4().hex
+            services.previews[preview_id] = {"map_id": map_id, "mask": mask,
+                                             "name": payload.get("name", "object") or "object"}
+            preview_path = services.project.root / "masks" / f"preview-{preview_id}.png"
+            Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode="L").save(preview_path)
+            services.previews[preview_id]["path"] = preview_path
+            return {"preview_id": preview_id, "mask_url": f"/api/previews/{preview_id}"}
 
         return {"job_id": services.jobs.submit(work)}
+
+    @app.get("/api/previews/{preview_id}")
+    def preview_mask(preview_id: str):
+        preview = services.previews.get(preview_id)
+        if not preview:
+            raise HTTPException(404, "预览不存在")
+        return FileResponse(preview["path"], media_type="image/png")
+
+    @app.post("/api/maps/{map_id}/segment/commit")
+    def commit_segment(map_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        preview = services.previews.pop(payload["preview_id"], None)
+        if not preview or preview["map_id"] != map_id:
+            raise HTTPException(404, "预览不存在或不属于当前地图")
+        layer_id = uuid4().hex
+        repository = DiskMaskRepository(services.project, map_id)
+        name = payload.get("name") or preview["name"] or "object"
+        layer = LayerState.mask_layer(layer_id, state.next_layer_name(name), name,
+                                      repository.save(layer_id, preview["mask"]))
+        history(map_id).execute(CreateLayerCommand(state, layer))
+        Path(preview["path"]).unlink(missing_ok=True)
+        services.project.dirty = True
+        return asdict(layer)
+
+    @app.delete("/api/previews/{preview_id}")
+    def discard_preview(preview_id: str):
+        preview = services.previews.pop(preview_id, None)
+        if preview:
+            Path(preview["path"]).unlink(missing_ok=True)
+        return {"deleted": bool(preview)}
+
+    @app.post("/api/maps/{map_id}/layers/{layer_id}/paint")
+    def paint_layer(map_id: str, layer_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        layer = state.layer(layer_id)
+        if layer.locked:
+            raise HTTPException(409, "图层已锁定")
+        repository = DiskMaskRepository(services.project, map_id)
+        before = repository.load(layer.mask_path)
+        after = before.copy()
+        points = payload.get("points", [])
+        for start, end in zip(points, points[1:] or points):
+            distance = max(abs(end[0]-start[0]), abs(end[1]-start[1]), 1)
+            for step in range(int(distance)+1):
+                ratio = step / distance
+                after = paint_circle(after, start[0]+(end[0]-start[0])*ratio,
+                                     start[1]+(end[1]-start[1])*ratio,
+                                     float(payload.get("radius", 10)), int(payload.get("value", 255)))
+        history(map_id).execute(_EditMask(repository, layer.mask_path, before, after))
+        services.project.dirty = True
+        return {"updated": True}
 
     @app.patch("/api/maps/{map_id}/layers/{layer_id}")
     def patch_layer(map_id: str, layer_id: str, payload: dict = Body(...)):
