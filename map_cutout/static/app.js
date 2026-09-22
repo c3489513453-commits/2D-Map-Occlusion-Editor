@@ -1,10 +1,16 @@
 import { AppState, ApiClient } from "/static/state.js";
 import { CanvasEditor } from "/static/canvas_editor.js";
+import { LayerTree } from "/static/layer_tree.js";
 
 const state = new AppState(new ApiClient());
 const $ = selector => document.querySelector(selector);
 let toastTimer;
 const editor = new CanvasEditor($("#canvas-shell"), $("#canvas-stage"), $("#map-image"), $("#mask-canvas"));
+const layerTree = new LayerTree($("#layer-tree"), {
+  onSelect: (id, additive) => state.toggleLayerSelection(id, additive),
+  onPatch: (id, changes) => action(async () => { await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`, changes); state.setDirty(true); await state.loadLayers(); }),
+  onMove: (id, targetId) => action(async () => { const index=state.layers.findIndex(layer=>layer.id===targetId); await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`, {index}); state.setDirty(true); await state.loadLayers(); }),
+});
 
 function toast(message) {
   const node = $("#toast"); node.textContent = message; node.classList.add("show");
@@ -35,12 +41,7 @@ function renderCanvas() {
 function renderLayers() {
   const layers = state.orderedLayers();
   $("#layer-empty").hidden = layers.length > 0;
-  $("#layer-tree").innerHTML = layers.map(layer => `
-    <div class="layer-row ${state.selectedLayerIds.has(layer.id) ? "selected" : ""}" data-layer-id="${layer.id}">
-      <button class="toggle eye ${layer.visible ? "on" : ""}" data-action="visibility" aria-label="显示或隐藏">${layer.visible ? "◉" : "○"}</button>
-      <span class="name">${escapeHtml(layer.name)}</span><span class="layer-kind">${layer.kind === "original" ? "底图" : "蒙版"}</span>
-      <button class="toggle lock ${layer.locked ? "on" : ""}" data-action="lock" aria-label="锁定或解锁">${layer.locked ? "▣" : "□"}</button>
-    </div>`).join("");
+  layerTree.render(state.layers, state.folders, state.selectedLayerIds);
 }
 
 function render() {
@@ -69,12 +70,6 @@ async function submitSegment(payload) {
 state.addEventListener("change", render);
 window.addEventListener("beforeunload", event => state.beforeUnload(event));
 $("#map-list").addEventListener("click", event => { const card=event.target.closest("[data-map-id]"); if(card) action(()=>state.selectMap(card.dataset.mapId)); });
-$("#layer-tree").addEventListener("click", event => action(async () => {
-  const row=event.target.closest("[data-layer-id]"); if(!row) return;
-  const id=row.dataset.layerId, layer=state.layers.find(item=>item.id===id), actionName=event.target.dataset.action;
-  if(actionName){ const key=actionName==="visibility"?"visible":"locked"; await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`,{[key]:!layer[key]}); state.setDirty(true); await state.loadLayers(); }
-  else state.toggleLayerSelection(id,event.ctrlKey||event.metaKey);
-}));
 $("#save").addEventListener("click",()=>action(()=>state.save()));
 document.querySelectorAll("[data-tool]").forEach(button => button.addEventListener("click", () => {
   document.querySelectorAll("[data-tool]").forEach(item => item.classList.remove("active"));
@@ -87,8 +82,10 @@ editor.addEventListener("points", event => state.setStatus(`已添加 ${event.de
 editor.addEventListener("stroke", () => state.setStatus("画笔修改待提交"));
 $("#zoom-in").addEventListener("click", () => editor.setZoom(editor.view.scale * 1.2));
 $("#zoom-out").addEventListener("click", () => editor.setZoom(editor.view.scale / 1.2));
+$("#add-folder").addEventListener("click", () => action(async () => { const name=prompt("文件夹名称","新文件夹"); if(!name)return; const folder=await state.api.post(`/api/maps/${state.currentMapId}/folders`,{name}); state.folders.push(folder); state.setDirty(true); state.emit(); }));
+$("#merge").addEventListener("click", () => action(async () => { const ids=[...state.selectedLayerIds].filter(id=>state.layers.find(layer=>layer.id===id)?.kind!=="original"); if(ids.length<2)throw new Error("请先选择至少两个蒙版图层"); await state.api.post(`/api/maps/${state.currentMapId}/layers/merge`,{layer_ids:ids}); state.selectedLayerIds.clear(); state.setDirty(true); await state.loadLayers(); }));
 $("#undo").addEventListener("click",()=>action(async()=>{await state.api.post(`/api/maps/${state.currentMapId}/undo`);state.setDirty(true);await state.loadLayers();}));
 $("#redo").addEventListener("click",()=>action(async()=>{await state.api.post(`/api/maps/${state.currentMapId}/redo`);state.setDirty(true);await state.loadLayers();}));
-document.addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="s"){event.preventDefault();action(()=>state.save());}if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();$("#undo").click();}});
+document.addEventListener("keydown",event=>{if(!(event.ctrlKey||event.metaKey))return;const key=event.key.toLowerCase();if(key==="s"){event.preventDefault();action(()=>state.save());}else if(key==="z"&&!event.shiftKey){event.preventDefault();$("#undo").click();}else if(key==="y"||(key==="z"&&event.shiftKey)){event.preventDefault();$("#redo").click();}});
 
 action(async()=>{state.setStatus("正在读取项目",true);await state.loadMaps();state.setStatus("准备就绪");});

@@ -11,8 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from .commands import (
-    CreateFolderCommand, CreateLayerCommand, DeleteLayerCommand, MergeLayersCommand,
-    RenameLayerCommand, SetLayerLockCommand, SetLayerVisibilityCommand,
+    AssignLayerFolderCommand, CreateFolderCommand, CreateLayerCommand, DeleteLayerCommand,
+    MergeLayersCommand, MoveLayerCommand, RenameLayerCommand, SetLayerLockCommand,
+    SetLayerVisibilityCommand,
 )
 from .config import AppConfig
 from .domain import BoundingBox, ExportMode, LayerState
@@ -188,6 +189,10 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         for key, command_type in commands.items():
             if key in payload:
                 history(map_id).execute(command_type(state, layer_id, payload[key]))
+        if "folder_id" in payload:
+            history(map_id).execute(AssignLayerFolderCommand(state, layer_id, payload["folder_id"]))
+        if "index" in payload:
+            history(map_id).execute(MoveLayerCommand(state, layer_id, int(payload["index"])))
         services.project.dirty = True
         return asdict(state.layer(layer_id))
 
