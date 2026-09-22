@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -152,6 +153,52 @@ def test_blank_layer_can_be_painted_without_a_prior_region(tmp_path):
     assert len(after) == len(before) + 1
 
 
+def test_deleting_a_map_keeps_the_source_file(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    first = app_services.project.state.maps[0]
+    second_path = tmp_path / "第二张.png"
+    Image.new("RGB", (8, 8), "blue").save(second_path)
+    second = client.post("/api/import/image", json={"path": str(second_path)}).json()
+
+    deleted = client.delete(f"/api/maps/{first.id}")
+    assert deleted.status_code == 200
+    assert Path(first.source_path).is_file()
+    remaining = client.get("/api/maps").json()
+    assert [item["id"] for item in remaining] == [second["id"]]
+    assert client.get(f"/api/maps/{first.id}/layers").status_code == 404
+
+    renamed = client.patch(
+        f"/api/maps/{second['id']}/layers/original",
+        json={"name": "底图"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "底图"
+
+
+def test_folder_can_hold_a_layer_and_then_be_deleted(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={"name": "城门"}).json()
+    folder = client.post(f"/api/maps/{map_state.id}/folders", json={"name": "建筑"}).json()
+
+    moved = client.patch(
+        f"/api/maps/{map_state.id}/layers/{created['id']}",
+        json={"folder_id": folder["id"]},
+    )
+    assert moved.status_code == 200
+    assert moved.json()["folder_id"] == folder["id"]
+
+    deleted = client.delete(f"/api/maps/{map_state.id}/folders/{folder['id']}")
+    assert deleted.status_code == 200
+    layers = client.get(f"/api/maps/{map_state.id}/layers").json()
+    layer = next(item for item in layers if item["id"] == created["id"])
+    assert layer["folder_id"] is None
+    maps = client.get("/api/maps").json()
+    assert maps[0]["folders"] == []
+
+
 def test_new_named_layer_starts_empty_and_lasso_adds_only_its_interior(tmp_path):
     app_services = services(tmp_path)
     client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
@@ -179,6 +226,104 @@ def test_new_named_layer_starts_empty_and_lasso_adds_only_its_interior(tmp_path)
     after = client.get(f"/api/maps/{map_state.id}/layers").json()
     assert len(after) == len(before) + 2
     assert after[0]["id"] == duplicate["id"]
+
+
+def test_box_segment_keeps_existing_masks_and_only_the_new_part(tmp_path):
+    app_services = services(tmp_path)
+    map_state = app_services.project.state.maps[0]
+
+    class FullBox:
+        def segment_box(self, image, box):
+            return np.ones((image.height, image.width), dtype=bool)
+
+    app_services.inference = FullBox()
+    repository = DiskMaskRepository(app_services.project, map_state.id)
+    existing = np.zeros((map_state.height, map_state.width), dtype=bool)
+    existing[:, :8] = True
+    path = repository.save("old", existing)
+    map_state.layers.append(LayerState.mask_layer("old", "旧蒙版", "object", path))
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+
+    job = wait_for_job(client, client.post(
+        f"/api/maps/{map_state.id}/segment",
+        json={"box": [0, 0, map_state.width, map_state.height], "name": "新区"},
+    ).json()["job_id"])
+    assert job["state"] == "completed"
+    preview = np.asarray(Image.open(
+        app_services.project.root / "masks" / f"preview-{job['result']['preview_id']}.png"
+    ).convert("L"))
+    assert int(preview[:, :8].max()) == 0
+    assert int(preview[:, 8:].min()) == 255
+
+    layer = client.post(
+        f"/api/maps/{map_state.id}/segment/commit",
+        json={"preview_id": job["result"]["preview_id"], "name": "新区"},
+    ).json()
+    saved = np.asarray(Image.open(layer["mask_path"]).convert("L"))
+    assert int(saved[:, :8].max()) == 0
+    assert int(saved[:, 8:].min()) == 255
+
+
+def test_box_on_an_edited_layer_adds_the_recognition_without_covering_other_masks(tmp_path):
+    app_services = services(tmp_path)
+    map_state = app_services.project.state.maps[0]
+
+    class FullBox:
+        def segment_box(self, image, box):
+            return np.ones((image.height, image.width), dtype=bool)
+
+    app_services.inference = FullBox()
+    repository = DiskMaskRepository(app_services.project, map_state.id)
+    existing = np.zeros((map_state.height, map_state.width), dtype=bool)
+    existing[:, :8] = True
+    old_path = repository.save("old", existing)
+    map_state.layers.append(LayerState.mask_layer("old", "旧蒙版", "object", old_path))
+    editing = np.zeros((map_state.height, map_state.width), dtype=bool)
+    editing[:2, 20:22] = True
+    edit_path = repository.save("edit", editing)
+    map_state.layers.append(LayerState.mask_layer("edit", "正在改", "object", edit_path))
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    before = client.get(f"/api/maps/{map_state.id}/layers").json()
+
+    job = wait_for_job(client, client.post(
+        f"/api/maps/{map_state.id}/layers/edit/segment-add",
+        json={"box": [0, 0, map_state.width, map_state.height]},
+    ).json()["job_id"])
+
+    assert job["state"] == "completed"
+    assert job["result"]["added"] is True
+    saved = np.asarray(Image.open(edit_path).convert("L"))
+    assert saved[0, 21] == 255
+    assert int(saved[:, :8].max()) == 0
+    assert int(saved[:, 8:].min()) == 255
+    untouched = np.asarray(Image.open(old_path).convert("L"))
+    assert int(untouched[:, :8].min()) == 255
+    assert client.get(f"/api/maps/{map_state.id}/layers").json() == before
+
+
+def test_box_segment_adds_nothing_when_the_place_is_already_covered(tmp_path):
+    app_services = services(tmp_path)
+    map_state = app_services.project.state.maps[0]
+
+    class FullBox:
+        def segment_box(self, image, box):
+            return np.ones((image.height, image.width), dtype=bool)
+
+    app_services.inference = FullBox()
+    repository = DiskMaskRepository(app_services.project, map_state.id)
+    path = repository.save("old", np.ones((map_state.height, map_state.width), dtype=bool))
+    map_state.layers.append(LayerState.mask_layer("old", "旧蒙版", "object", path))
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    before = client.get(f"/api/maps/{map_state.id}/layers").json()
+
+    job = wait_for_job(client, client.post(
+        f"/api/maps/{map_state.id}/segment",
+        json={"box": [0, 0, map_state.width, map_state.height], "name": "新区"},
+    ).json()["job_id"])
+
+    assert job["state"] == "completed"
+    assert job["result"]["preview_id"] is None
+    assert client.get(f"/api/maps/{map_state.id}/layers").json() == before
 
 
 def test_project_save_and_layer_patch(tmp_path):

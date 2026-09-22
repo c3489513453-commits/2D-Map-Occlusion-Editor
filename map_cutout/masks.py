@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
-from PIL import Image, ImageDraw
 
 from .domain import BoundingBox
 
 
 class EmptyMaskError(ValueError):
     pass
+
+
+def take_unoccupied(mask: np.ndarray, occupied: np.ndarray) -> np.ndarray:
+    """Keep only the pixels that no earlier mask has already claimed."""
+    incoming = np.asarray(mask, dtype=bool)
+    claimed = np.asarray(occupied, dtype=bool)
+    if incoming.shape != claimed.shape:
+        raise ValueError("蒙版尺寸必须一致")
+    return incoming & ~claimed
 
 
 def union_masks(masks: list[np.ndarray]) -> np.ndarray:
@@ -35,14 +45,57 @@ def paint_circle(
     return result
 
 
+def _nonzero_polygon(points: list[tuple[float, float]], height: int, width: int) -> np.ndarray:
+    """Pixels whose center sits inside the polygon, including where the line crosses itself.
+
+    The on-screen lasso uses this same rule. A crossing outline used to be saved
+    with the middle left empty, so the area disappeared after leaving the map.
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    events_x: list[list[int]] = [[] for _ in range(height)]
+    events_sign: list[list[int]] = [[] for _ in range(height)]
+    count = len(pts)
+    for index in range(count):
+        x1, y1 = float(pts[index, 0]), float(pts[index, 1])
+        x2, y2 = float(pts[(index + 1) % count, 0]), float(pts[(index + 1) % count, 1])
+        if y1 == y2:
+            continue
+        sign = 1 if y2 > y1 else -1
+        y_lo, y_hi = (y1, y2) if y1 < y2 else (y2, y1)
+        row0 = max(0, int(math.ceil(y_lo - 1e-9)))
+        row1 = min(height, int(math.ceil(y_hi - 1e-9)))
+        for y in range(row0, row1):
+            yc = y + 0.5
+            if not (y_lo <= yc < y_hi):
+                continue
+            x = x1 + (yc - y1) * (x2 - x1) / (y2 - y1)
+            events_x[y].append(int(math.floor(x - 0.5)) + 1)
+            events_sign[y].append(sign)
+    covered = np.zeros((height, width), dtype=bool)
+    for y in range(height):
+        if not events_x[y]:
+            continue
+        cols = np.asarray(events_x[y], dtype=np.int32)
+        signs = np.asarray(events_sign[y], dtype=np.int16)
+        delta = np.zeros(width, dtype=np.int16)
+        before = cols < 0
+        if before.any():
+            delta[0] += np.int16(signs[before].sum())
+        on_row = (cols >= 0) & (cols < width)
+        if on_row.any():
+            np.add.at(delta, cols[on_row], signs[on_row])
+        covered[y] = np.cumsum(delta) != 0
+    return covered
+
+
 def paint_polygon(
     mask: np.ndarray, points: list[tuple[float, float]], value: int
 ) -> np.ndarray:
     if len(points) < 3:
         raise ValueError("套索至少需要三个点")
-    image = Image.fromarray(mask.astype(np.uint8, copy=True), mode="L")
-    ImageDraw.Draw(image).polygon(points, fill=int(value))
-    return np.asarray(image, dtype=np.uint8).copy()
+    result = np.asarray(mask).astype(np.uint8, copy=True)
+    result[_nonzero_polygon(points, result.shape[0], result.shape[1])] = np.uint8(value)
+    return result
 
 
 def to_mask_image(mask: np.ndarray) -> np.ndarray:

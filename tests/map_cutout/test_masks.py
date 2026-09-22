@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pytest
 
@@ -7,9 +9,20 @@ from map_cutout.masks import (
     mask_bounds,
     paint_circle,
     paint_polygon,
+    take_unoccupied,
     to_mask_image,
     union_masks,
 )
+
+
+def test_later_mask_keeps_only_the_unclaimed_pixels():
+    occupied = np.zeros((4, 6), dtype=bool)
+    occupied[:, :3] = True
+    incoming = np.ones((4, 6), dtype=bool)
+    fresh = take_unoccupied(incoming, occupied)
+    assert fresh[:, :3].sum() == 0
+    assert fresh[:, 3:].all()
+    assert occupied[:, :3].all()
 
 
 def test_paint_and_erase_are_clipped_to_image_bounds():
@@ -44,6 +57,16 @@ def test_polygon_can_add_and_remove_a_closed_region():
     assert added[0, 0] == 0
     assert removed[5, 5] == 0
     assert removed[3, 3] == 255
+
+
+def test_crossed_lasso_keeps_the_middle():
+    points = []
+    for index in range(5):
+        angle = -math.pi / 2 + index * 4 * math.pi / 5
+        points.append((50 + 40 * math.cos(angle), 50 + 40 * math.sin(angle)))
+    painted = paint_polygon(np.zeros((100, 100), dtype=np.uint8), points, 255)
+    assert painted[50, 50] == 255
+    assert painted[0, 0] == 0
 
 
 def test_painted_white_pixels_stay_white_when_saved():

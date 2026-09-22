@@ -34,6 +34,15 @@ export function canCloseLasso(points, point, scale, threshold = 14) {
   return Math.hypot(dx, dy) <= threshold;
 }
 
+export function topMaskId(layers, contains) {
+  for (let index = layers.length - 1; index >= 0; index -= 1) {
+    const layer = layers[index];
+    if (!layer || layer.kind === "original" || layer.visible === false || !layer.mask_path) continue;
+    if (contains(layer)) return layer.id;
+  }
+  return null;
+}
+
 export function lassoCommitPoints(points, closingPoint, scale, threshold = 14) {
   if (!canCloseLasso(points, closingPoint, scale, threshold)) return null;
   return points.map(point => [point.x, point.y]);
@@ -67,7 +76,11 @@ export class CanvasEditor extends EventTarget {
     this.maskGeneration = 0;
     this.maskEditLayerId = null;
     this.loadedMapId = null;
-    image.addEventListener("load", () => this.resize());
+    image.addEventListener("load", () => {
+      this.maskOverlays.clear();
+      if (this.previewImage) this.previewOverlay = this.createTintedMask(this.previewImage, [240, 184, 91], .55);
+      this.resize();
+    });
     this.bind();
   }
 
@@ -102,6 +115,7 @@ export class CanvasEditor extends EventTarget {
 
   forgetLocalMasks() {
     this.maskGeneration += 1;
+    for (const image of this.maskImages.values()) image.close?.();
     this.maskCanvases.clear();
     this.maskImages.clear();
     this.maskOverlays.clear();
@@ -110,6 +124,8 @@ export class CanvasEditor extends EventTarget {
   }
 
   dropLocalMask(layerId) {
+    const image = this.maskImages.get(layerId);
+    if (image && image !== this.maskCanvases.get(layerId)) image.close?.();
     this.maskCanvases.delete(layerId);
     this.maskImages.delete(layerId);
     this.maskOverlays.delete(layerId);
@@ -121,16 +137,17 @@ export class CanvasEditor extends EventTarget {
   editableMask(layerId) {
     const existing = this.maskCanvases.get(layerId);
     if (existing) return existing;
-    const width = this.image.naturalWidth;
-    const height = this.image.naturalHeight;
     const current = this.maskImages.get(layerId);
+    const width = current?.naturalWidth || current?.width;
+    const height = current?.naturalHeight || current?.height;
     if (!width || !height || !current) throw new Error("这张蒙版还没有显示出来，请等它出现后再修改");
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const context = canvas.getContext("2d");
     context.imageSmoothingEnabled = false;
-    context.drawImage(current, 0, 0, width, height);
+    context.drawImage(current, 0, 0);
+    if (current.close) current.close();
     this.maskCanvases.set(layerId, canvas);
     this.maskImages.set(layerId, canvas);
     return canvas;
@@ -153,7 +170,7 @@ export class CanvasEditor extends EventTarget {
       context.moveTo(points[0][0], points[0][1]);
       for (let index = 1; index < points.length; index += 1) context.lineTo(points[index][0], points[index][1]);
       context.closePath();
-      context.fill();
+      context.fill("nonzero");
     } else if (points.length) {
       const radius = Number(stroke.radius) || 10;
       context.lineWidth = radius * 2;
@@ -171,6 +188,31 @@ export class CanvasEditor extends EventTarget {
     this.maskImages.set(layerId, canvas);
     this.maskOverlays.delete(layerId);
     this.render();
+  }
+
+  maskContains(image, x, y) {
+    const width = image.naturalWidth || image.width;
+    const height = image.naturalHeight || image.height;
+    const px = Math.floor(x);
+    const py = Math.floor(y);
+    if (!width || !height || px < 0 || py < 0 || px >= width || py >= height) return false;
+    if (!this.hitCanvas) {
+      this.hitCanvas = document.createElement("canvas");
+      this.hitCanvas.width = 1;
+      this.hitCanvas.height = 1;
+      this.hitContext = this.hitCanvas.getContext("2d", {willReadFrequently: true});
+    }
+    this.hitContext.clearRect(0, 0, 1, 1);
+    this.hitContext.drawImage(image, px, py, 1, 1, 0, 0, 1, 1);
+    const pixel = this.hitContext.getImageData(0, 0, 1, 1).data;
+    return Math.max(pixel[0], pixel[1], pixel[2]) > 16;
+  }
+
+  pickMask(x, y) {
+    return topMaskId(this.layers, layer => {
+      const image = this.maskImages.get(layer.id);
+      return Boolean(image) && this.maskContains(image, x, y);
+    });
   }
 
   cancelLasso() {
@@ -303,6 +345,16 @@ export class CanvasEditor extends EventTarget {
       this.canvas.setPointerCapture(event.pointerId);
       return;
     }
+    if (this.tool === "select") {
+      const point = this.local(event);
+      this.dispatchEvent(new CustomEvent("pick", {
+        detail: {
+          id: this.pickMask(point.x, point.y),
+          additive: event.shiftKey || event.ctrlKey || event.metaKey,
+        },
+      }));
+      return;
+    }
     if (EDIT_TOOLS.includes(this.tool) && !this.maskEditLayerId) {
       this.dispatchEvent(new CustomEvent("need-edit"));
       return;
@@ -372,9 +424,13 @@ export class CanvasEditor extends EventTarget {
     if (this.drag.type === "box") {
       const a = this.drag.start;
       const b = this.drag.current;
-      this.dispatchEvent(new CustomEvent("box", {
-        detail: [Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y)].map(Math.round),
-      }));
+      const box = [Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y)];
+      const rounded = box.map(value => Math.round(value));
+      const [x1, y1, x2, y2] = rounded;
+      if (x2 > x1 && y2 > y1) {
+        const name = this.maskEditLayerId ? "box-add" : "box";
+        this.dispatchEvent(new CustomEvent(name, {detail: rounded}));
+      }
     } else if (this.drag.type === "stroke") {
       this.dispatchEvent(new CustomEvent("stroke", {
         detail: {
@@ -389,8 +445,12 @@ export class CanvasEditor extends EventTarget {
   }
 
   async loadMasks() {
-    const visible = this.layers.filter(layer => layer.visible && layer.mask_path);
+    const generation = this.maskGeneration;
+    const mapId = this.loadedMapId;
+    const visible = this.layers.filter(layer => layer.visible && layer.mask_path && layer.map_id === mapId);
     await Promise.all(visible.map(layer => this.loadOneMask(layer)));
+    if (generation !== this.maskGeneration || mapId !== this.loadedMapId) return;
+    this.maskOverlays.clear();
     this.render();
   }
 
@@ -405,33 +465,52 @@ export class CanvasEditor extends EventTarget {
     const version = this.maskVersions.get(layer.id) || 0;
     const generation = this.maskGeneration;
     const token = this.maskLoadToken.get(layer.id) || 0;
-    const promise = new Promise(resolve => {
+    const promise = this.scheduleMask(() => new Promise(resolve => {
       const img = new Image();
-      img.onload = () => {
+      img.onload = async () => {
+        let bitmap = img;
+        try { bitmap = await createImageBitmap(img); } catch (error) { bitmap = img; }
         const currentToken = this.maskLoadToken.get(layer.id) || 0;
-        if (generation !== this.maskGeneration || currentToken !== token || this.maskCanvases.has(layer.id)) {
+        const stale = generation !== this.maskGeneration || currentToken !== token
+          || layer.map_id !== this.loadedMapId || this.maskCanvases.has(layer.id);
+        if (stale) {
+          bitmap.close?.();
           resolve();
           return;
         }
-        this.maskImages.set(layer.id, img);
+        this.maskImages.set(layer.id, bitmap);
         this.maskOverlays.delete(layer.id);
         resolve();
       };
       img.onerror = resolve;
       img.src = `/api/maps/${layer.map_id}/layers/${layer.id}/mask?v=${version}-${generation}-${token}`;
-    }).finally(() => this.maskLoading.delete(layer.id));
+    })).finally(() => {
+      if (this.maskLoading.get(layer.id) === promise) this.maskLoading.delete(layer.id);
+    });
     this.maskLoading.set(layer.id, promise);
     return promise;
   }
 
+  scheduleMask(work) {
+    if (!this.maskSlots) {
+      this.maskSlots = [Promise.resolve(), Promise.resolve(), Promise.resolve()];
+      this.maskSlotIndex = 0;
+    }
+    const index = this.maskSlotIndex++ % this.maskSlots.length;
+    const slot = this.maskSlots[index].then(work, work);
+    this.maskSlots[index] = slot.then(() => {}, () => {});
+    return slot;
+  }
+
   createTintedMask(image, color, opacity) {
-    const w = this.image.naturalWidth;
-    const h = this.image.naturalHeight;
+    const w = image.naturalWidth || image.width;
+    const h = image.naturalHeight || image.height;
+    if (!w || !h) return null;
     const canvas = document.createElement("canvas");
     canvas.width = w;
     canvas.height = h;
     const context = canvas.getContext("2d", {willReadFrequently: true});
-    context.drawImage(image, 0, 0, w, h);
+    context.drawImage(image, 0, 0);
     const data = context.getImageData(0, 0, w, h);
     maskPixelsToTintedRgba(data.data, color, opacity);
     context.putImageData(data, 0, 0);
@@ -450,12 +529,12 @@ export class CanvasEditor extends EventTarget {
         let overlay = this.maskOverlays.get(layer.id);
         if (!overlay) {
           overlay = this.createTintedMask(mask, [63, 210, 230], .42);
-          this.maskOverlays.set(layer.id, overlay);
+          if (overlay) this.maskOverlays.set(layer.id, overlay);
         }
-        c.drawImage(overlay, 0, 0, w, h);
+        if (overlay) c.drawImage(overlay, 0, 0);
       }
     }
-    if (this.previewOverlay) c.drawImage(this.previewOverlay, 0, 0, w, h);
+    if (this.previewOverlay) c.drawImage(this.previewOverlay, 0, 0);
     c.lineWidth = 2 / this.view.scale;
     c.strokeStyle = "#63d5e6";
     c.fillStyle = "#63d5e622";

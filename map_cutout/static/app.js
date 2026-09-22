@@ -13,7 +13,35 @@ const layerTree = new LayerTree($("#layer-tree"), {
   onSelect: (id, additive) => state.toggleLayerSelection(id, additive),
   onEdit: id => beginMaskEdit(id),
   onPatch: (id, changes) => action(async () => { await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`, changes); state.setDirty(true); await state.loadLayers(); }),
-  onMove: (id, targetId) => action(async () => { const index=state.layers.findIndex(layer=>layer.id===targetId); await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`, {index}); state.setDirty(true); await state.loadLayers(); }),
+  onMove: (id, target) => action(async () => {
+    if (!target || id === target.layerId) return;
+    const payload = {};
+    if (target.layerId) {
+      const index = state.layers.findIndex(layer => layer.id === target.layerId);
+      if (index >= 0) payload.index = index;
+    }
+    if ("folderId" in target) payload.folder_id = target.folderId;
+    await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`, payload);
+    state.setDirty(true);
+    await state.loadLayers();
+    const layer = state.layers.find(item => item.id === id);
+    const folder = state.folders.find(item => item.id === layer?.folder_id);
+    state.setStatus(folder ? `已把「${layer.name}」放进「${folder.name}」` : `已调整「${layer?.name || "图层"}」的位置`);
+  }),
+  onRename: (id, name) => action(async () => {
+    await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`, {name});
+    state.setDirty(true);
+    await state.loadLayers();
+    state.setStatus(`已把图层改名为「${name}」`);
+  }),
+  onDeleteFolder: id => action(async () => {
+    await state.api.delete(`/api/maps/${state.currentMapId}/folders/${id}`);
+    const map = state.maps.find(item => item.id === state.currentMapId);
+    if (map) map.folders = (map.folders || []).filter(folder => folder.id !== id);
+    state.setDirty(true);
+    await state.loadLayers();
+    state.setStatus("文件夹已删除，里面的图层还在");
+  }),
   onDelete: id => action(async () => {
     const layer = state.layers.find(item => item.id === id);
     if (!layer || layer.kind === "original") return;
@@ -43,6 +71,7 @@ function renderMaps() {
   $("#map-list").innerHTML = state.maps.map(map => `
     <div class="map-card ${map.id === state.currentMapId ? "active" : ""}" data-map-id="${map.id}">
       <img src="/api/maps/${map.id}/image" alt=""><div><strong>${escapeHtml(map.source_path.split(/[\\/]/).pop())}</strong><small>${map.width} × ${map.height}</small></div>
+      <button type="button" class="map-delete" data-action="delete-map" aria-label="删除地图">删除</button>
     </div>`).join("");
   if (editor.loadedMapId !== state.currentMapId) {
     editor.loadedMapId = state.currentMapId;
@@ -102,7 +131,33 @@ async function submitSegment(payload) {
 
 state.addEventListener("change", render);
 window.addEventListener("beforeunload", event => state.beforeUnload(event));
-$("#map-list").addEventListener("click", event => { const card=event.target.closest("[data-map-id]"); if(card) action(()=>state.selectMap(card.dataset.mapId)); });
+$("#map-list").addEventListener("click", event => {
+  const card = event.target.closest("[data-map-id]");
+  if (!card) return;
+  if (event.target.closest("[data-action='delete-map']")) {
+    action(async () => {
+      const id = card.dataset.mapId;
+      const wasCurrent = state.currentMapId === id;
+      await state.api.delete(`/api/maps/${id}`);
+      if (wasCurrent) {
+        state.currentMapId = null;
+        state.layers = [];
+        state.folders = [];
+        state.selectedLayerIds.clear();
+        state.editingLayerId = null;
+        editor.setMaskEdit(null);
+        editor.cancelLasso();
+        editor.forgetLocalMasks();
+        editor.loadedMapId = null;
+      }
+      state.setDirty(true);
+      await state.loadMaps();
+      state.setStatus("已从列表中移除，原来的图片文件还在");
+    });
+    return;
+  }
+  action(() => state.selectMap(card.dataset.mapId));
+});
 $("#save").addEventListener("click",()=>action(()=>state.save()));
 $("#new-project").addEventListener("click",()=>action(async()=>{const {path}=await state.api.get("/api/dialog/folder?title=选择项目保存文件夹");if(!path)return;const name=prompt("项目名称",path.split(/[\\/]/).pop()||"地图项目");if(!name)return;await state.api.post("/api/projects/new",{path,name});state.maps=[];state.currentMapId=null;state.layers=[];state.setDirty(true);state.emit();}));
 $("#open-project").addEventListener("click",()=>action(async()=>{const {path}=await state.api.get("/api/dialog/folder?title=选择已有项目文件夹");if(!path)return;await state.api.post("/api/projects/open",{path});state.maps=[];state.currentMapId=null;await state.loadMaps();state.setDirty(false);state.setStatus("项目已打开");}));
@@ -111,6 +166,10 @@ $("#import-folder").addEventListener("click",()=>action(async()=>{const {path}=a
 function activateTool(tool) {
   document.querySelectorAll("[data-tool]").forEach(item => item.classList.toggle("active", item.dataset.tool === tool));
   editor.setTool(tool);
+  if (state.editingLayerId && tool === "box") {
+    const layer = state.layers.find(item => item.id === state.editingLayerId);
+    state.setStatus(`框选会识别方框里的物体，并把识别到的区域加进「${layer?.name || "当前蒙版"}」。`);
+  }
 }
 function beginMaskEdit(id, tool = "lasso-add") {
   const layer = state.layers.find(item => item.id === id);
@@ -144,7 +203,32 @@ editor.addEventListener("locked", () => toast("这个图层已锁定，请先点
 editor.addEventListener("need-edit", () => toast("请先在右侧蒙版图层上点击「继续编辑」，再画套索或用画笔。"));
 $("#zoom-in").addEventListener("click", () => editor.setZoom(editor.view.scale * 1.2));
 $("#zoom-out").addEventListener("click", () => editor.setZoom(editor.view.scale / 1.2));
-$("#add-folder").addEventListener("click", () => action(async () => { const name=prompt("文件夹名称","新文件夹"); if(!name)return; const folder=await state.api.post(`/api/maps/${state.currentMapId}/folders`,{name}); state.folders.push(folder); state.setDirty(true); state.emit(); }));
+$("#add-folder").addEventListener("click", () => action(async () => {
+  if (!state.currentMapId) throw new Error("请先导入地图");
+  const name = prompt("文件夹名称", "新文件夹");
+  if (!name) return;
+  const folder = await state.api.post(`/api/maps/${state.currentMapId}/folders`, {name});
+  const map = state.maps.find(item => item.id === state.currentMapId);
+  if (map) map.folders = [...(map.folders || []), folder];
+  state.setDirty(true);
+  await state.loadLayers();
+  state.setStatus(`已建立文件夹「${folder.name}」。把图层拖到它上面，就会放进这个文件夹。`);
+}));
+editor.addEventListener("pick", event => {
+  const {id, additive} = event.detail || {};
+  if (!id) {
+    if (!additive) state.selectedLayerIds.clear();
+    state.setStatus("这里没有蒙版");
+    state.emit();
+    return;
+  }
+  const layer = state.layers.find(item => item.id === id);
+  if (layer?.folder_id) layerTree.collapsed.delete(layer.folder_id);
+  const removing = additive && state.selectedLayerIds.has(id);
+  state.toggleLayerSelection(id, additive);
+  state.setStatus(removing ? `已取消选中「${layer?.name || "图层"}」` : `已选中「${layer?.name || "图层"}」`);
+  requestAnimationFrame(() => document.querySelector(`#layer-tree [data-layer-id="${CSS.escape(id)}"]`)?.scrollIntoView({block: "nearest"}));
+});
 $("#add-layer").addEventListener("click", () => action(async () => {
   if (!state.currentMapId) throw new Error("请先导入地图");
   const layer = await state.api.post(`/api/maps/${state.currentMapId}/layers`, {name: "新图层"});

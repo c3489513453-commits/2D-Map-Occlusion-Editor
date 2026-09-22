@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -12,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from .commands import (
-    AssignLayerFolderCommand, CreateFolderCommand, CreateLayerCommand, DeleteLayerCommand,
+    AssignLayerFolderCommand, CreateFolderCommand, CreateLayerCommand, DeleteFolderCommand,
+    DeleteLayerCommand,
     MergeLayersCommand, MoveLayerCommand, RenameLayerCommand, SetLayerLockCommand,
     SetLayerVisibilityCommand,
 )
@@ -22,7 +24,7 @@ from .exporter import BatchExportRequest, BatchExporter, export_layer, unique_wi
 from .history import HistoryManager
 from .inference import InferenceService
 from .jobs import JobManager
-from .masks import paint_circle, paint_polygon, to_mask_image
+from .masks import paint_circle, paint_polygon, take_unoccupied, to_mask_image
 from .project_store import ProjectStore
 
 
@@ -43,6 +45,14 @@ class DiskMaskRepository:
 
     def delete(self, path):
         Path(path).unlink(missing_ok=True)
+
+
+def occupied_mask(state, repository, skip_layer_id: str | None = None) -> np.ndarray:
+    occupied = np.zeros((state.height, state.width), dtype=bool)
+    for layer in state.layers:
+        if layer.mask_path and layer.id != skip_layer_id:
+            occupied |= repository.load(layer.mask_path)
+    return occupied
 
 
 class _BatchCreate:
@@ -177,6 +187,19 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
     def maps():
         return [asdict(item) for item in services.project.state.maps]
 
+    @app.delete("/api/maps/{map_id}")
+    def delete_map(map_id: str):
+        project = services.project
+        removed = map_state(map_id)
+        project.state.maps.remove(removed)
+        if project.state.current_map_id == map_id:
+            project.state.current_map_id = project.state.maps[0].id if project.state.maps else None
+        services.histories.forget(map_id)
+        shutil.rmtree(project.root / "masks" / map_id, ignore_errors=True)
+        (project.root / "thumbnails" / f"{map_id}.jpg").unlink(missing_ok=True)
+        project.dirty = True
+        return {"deleted": True, "current_map_id": project.state.current_map_id}
+
     @app.get("/api/maps/{map_id}/image")
     def map_image(map_id: str):
         return FileResponse(map_state(map_id).source_path)
@@ -207,11 +230,16 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
             results = services.inference.detect(image, payload.get("prompt", ""),
                                                 float(payload.get("threshold", .4)))
             repository = DiskMaskRepository(services.project, map_id)
+            occupied = occupied_mask(state, repository)
             created = []
             reserved_names = {layer.name for layer in state.layers}
             for result in results:
+                mask = take_unoccupied(result.mask, occupied)
+                if not mask.any():
+                    continue
+                occupied |= mask
                 layer_id = uuid4().hex
-                path = repository.save(layer_id, result.mask)
+                path = repository.save(layer_id, mask)
                 prefix = (result.class_name.strip().lower().replace(" ", "_") or "object")
                 number = 1
                 while f"{prefix}{number}" in reserved_names:
@@ -220,8 +248,9 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
                 reserved_names.add(name)
                 created.append(LayerState.mask_layer(
                     layer_id, name, result.class_name, path))
-            history(map_id).execute(_BatchCreate(state, created))
-            services.project.dirty = bool(created) or services.project.dirty
+            if created:
+                history(map_id).execute(_BatchCreate(state, created))
+                services.project.dirty = True
             return [asdict(layer) for layer in created]
 
         return {"job_id": services.jobs.submit(work)}
@@ -239,13 +268,53 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
                 box = BoundingBox(*payload["context_box"]) if payload.get("context_box") else None
                 mask = services.inference.segment_points(
                     image, payload["points"], payload["labels"], box)
+            repository = DiskMaskRepository(services.project, map_id)
+            mask = take_unoccupied(mask, occupied_mask(state, repository))
+            if not mask.any():
+                return {"preview_id": None, "empty": True}
             preview_id = uuid4().hex
             services.previews[preview_id] = {"map_id": map_id, "mask": mask,
                                              "name": payload.get("name", "object") or "object"}
             preview_path = services.project.root / "masks" / f"preview-{preview_id}.png"
-            Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, mode="L").save(preview_path)
+            Image.fromarray(to_mask_image(mask), mode="L").save(preview_path)
             services.previews[preview_id]["path"] = preview_path
             return {"preview_id": preview_id, "mask_url": f"/api/previews/{preview_id}"}
+
+        return {"job_id": services.jobs.submit(work)}
+
+    @app.post("/api/maps/{map_id}/layers/{layer_id}/segment-add")
+    def segment_add(map_id: str, layer_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        layer = state.layer(layer_id)
+        if layer.locked:
+            raise HTTPException(409, "图层已锁定")
+        if not layer.mask_path:
+            raise HTTPException(404, "此图层没有蒙版")
+        box = payload.get("box")
+        if not isinstance(box, list) or len(box) != 4:
+            raise HTTPException(400, "请先框选一块区域")
+
+        def work():
+            with Image.open(state.source_path) as opened:
+                image = opened.convert("RGB")
+            recognized = services.inference.segment_box(image, BoundingBox(*box))
+            repository = DiskMaskRepository(services.project, map_id)
+            with services.mask_lock(f"{map_id}:{layer_id}"):
+                before = repository.load(layer.mask_path)
+                fresh = take_unoccupied(recognized, occupied_mask(state, repository, layer_id))
+                new_pixels = fresh & ~before
+                if not new_pixels.any():
+                    if not np.asarray(recognized).any():
+                        reason = "empty"
+                    elif not fresh.any():
+                        reason = "occupied"
+                    else:
+                        reason = "already"
+                    return {"added": False, "reason": reason}
+                history(map_id).execute(_EditMask(
+                    repository, layer.mask_path, before, before | new_pixels))
+            services.project.dirty = True
+            return {"added": True}
 
         return {"job_id": services.jobs.submit(work)}
 
@@ -264,9 +333,13 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
             raise HTTPException(404, "预览不存在或不属于当前地图")
         layer_id = uuid4().hex
         repository = DiskMaskRepository(services.project, map_id)
+        mask = take_unoccupied(preview["mask"], occupied_mask(state, repository))
+        if not mask.any():
+            Path(preview["path"]).unlink(missing_ok=True)
+            raise HTTPException(409, "这块地方已经有蒙版了")
         name = payload.get("name") or preview["name"] or "object"
         layer = LayerState.mask_layer(layer_id, state.next_layer_name(name), name,
-                                      repository.save(layer_id, preview["mask"]))
+                                      repository.save(layer_id, mask))
         history(map_id).execute(CreateLayerCommand(state, layer))
         Path(preview["path"]).unlink(missing_ok=True)
         services.project.dirty = True
@@ -350,6 +423,15 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         folder = history(map_id).execute(CreateFolderCommand(map_state(map_id), payload["name"]))
         services.project.dirty = True
         return asdict(folder)
+
+    @app.delete("/api/maps/{map_id}/folders/{folder_id}")
+    def delete_folder(map_id: str, folder_id: str):
+        try:
+            history(map_id).execute(DeleteFolderCommand(map_state(map_id), folder_id))
+        except StopIteration:
+            raise HTTPException(404, "文件夹不存在")
+        services.project.dirty = True
+        return {"deleted": True}
 
     @app.post("/api/maps/{map_id}/undo")
     def undo(map_id: str):

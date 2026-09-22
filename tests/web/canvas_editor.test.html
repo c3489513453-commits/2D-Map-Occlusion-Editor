@@ -1,6 +1,6 @@
 <!doctype html><meta charset="utf-8"><title>RUNNING</title>
 <script type="module">
-import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload,canCloseLasso,lassoCommitPoints,CanvasEditor} from "/static/canvas_editor.js";
+import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload,canCloseLasso,lassoCommitPoints,topMaskId,CanvasEditor} from "/static/canvas_editor.js";
 try{
  const view={scale:.5,offsetX:100,offsetY:40};
  const p=screenToImage(150,90,view); if(p.x!==100||p.y!==100)throw Error("screenToImage 错误");
@@ -19,6 +19,10 @@ try{
  const committed=lassoCommitPoints(shape,{x:1,y:1},1);
  if(!committed||committed.length!==3||committed[2][0]!==40)throw Error("闭合后应只保留画出的轮廓");
  if(lassoCommitPoints(shape,{x:80,y:80},1))throw Error("没回到起点时不能生成区域");
+ const stack=[{id:"bottom",kind:"mask",visible:true,mask_path:"a"},{id:"top",kind:"mask",visible:true,mask_path:"b"},{id:"hidden",kind:"mask",visible:false,mask_path:"c"},{id:"original",kind:"original",visible:true}];
+ if(topMaskId(stack,layer=>layer.id==="top"||layer.id==="bottom")!=="top")throw Error("应选中最上面的蒙版");
+ if(topMaskId(stack,()=>false))throw Error("没点到蒙版时应为空");
+ if(topMaskId([{id:"hidden",kind:"mask",visible:false,mask_path:"c"}],()=>true))throw Error("隐藏图层不应被选中");
  const shell=document.createElement("div");
  const stage=document.createElement("div");
  const image=new Image();
@@ -45,6 +49,37 @@ try{
  if(!lit(12,4)||!lit(12,14)||!lit(24,12))throw Error("后画的区域没有留在原来的蒙版上");
  if(lit(3,3))throw Error("减去的区域还留在蒙版上");
  if(editor.maskImages.get("layer")!==editor.maskCanvases.get("layer"))throw Error("刷新蒙版时丢掉了正在编辑的选区");
+ const small=document.createElement("canvas"); small.width=8; small.height=8;
+ await new Promise(resolve=>{image.onload=resolve; image.src=small.toDataURL();});
+ const wide=document.createElement("canvas"); wide.width=16; wide.height=16;
+ const widePaint=wide.getContext("2d"); widePaint.fillStyle="#fff"; widePaint.fillRect(12,12,1,1);
+ const tint=editor.createTintedMask(wide,[63,210,230],1);
+ if(!tint||tint.width!==16||tint.height!==16)throw Error("蒙版被缩成了当前地图的尺寸");
+ const kept=tint.getContext("2d").getImageData(12,12,1,1).data;
+ if(kept[3]===0)throw Error("切换后蒙版边缘像素丢了");
+ editor.loadedMapId="map-b";
+ editor.image.dataset.mapId="map-b";
+ editor.layers=[{id:"wide",visible:true,mask_path:"wide.png",map_id:"map-b"}];
+ editor.maskImages.set("wide",wide);
+ editor.maskOverlays.clear();
+ editor.render();
+ const overlay=editor.maskOverlays.get("wide");
+ if(!overlay||overlay.width!==16||overlay.height!==16)throw Error("画到地图上时把蒙版裁小了");
+ let boxed=null; let addedBox=null;
+ editor.maskEditLayerId="wide";
+ editor.addEventListener("box",event=>{boxed=event.detail;});
+ editor.addEventListener("box-add",event=>{addedBox=event.detail;});
+ editor.tool="box";
+ editor.drag={type:"box",start:{x:1.2,y:2.2},current:{x:6.6,y:5.4}};
+ editor.pointerUp();
+ if(boxed)throw Error("编辑图层时框选不应再去生成新蒙版");
+ if(!addedBox||addedBox.join()!=="1,2,7,5")throw Error("编辑图层时框选应拿去识别并加进当前蒙版");
+ boxed=null; addedBox=null;
+ editor.maskEditLayerId=null;
+ editor.drag={type:"box",start:{x:1,y:1},current:{x:4,y:3}};
+ editor.pointerUp();
+ if(!boxed||boxed.join()!=="1,1,4,3")throw Error("没有编辑图层时框选应保持生成新蒙版");
+ if(addedBox)throw Error("没有编辑图层时不应加进当前蒙版");
  document.title="PASS";
 }catch(error){document.title="FAIL: "+error.message}
 </script>

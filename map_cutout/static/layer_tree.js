@@ -17,24 +17,44 @@ export class LayerTree {
 
   bind() {
     this.container.addEventListener("click", event => this.click(event));
+    this.container.addEventListener("dblclick", event => this.rename(event));
     this.container.addEventListener("dragstart", event => {
       const row = event.target.closest("[data-layer-id]");
-      if (row) event.dataTransfer.setData("text/plain", row.dataset.layerId);
+      if (!row || row.classList.contains("original")) return;
+      this.draggingId = row.dataset.layerId;
+      event.dataTransfer.setData("text/plain", this.draggingId);
+      event.dataTransfer.effectAllowed = "move";
     });
     this.container.addEventListener("dragover", event => {
-      const row = event.target.closest("[data-layer-id]");
-      if (row) {
-        event.preventDefault();
-        row.classList.add("drop-target");
-      }
+      const row = event.target.closest("[data-layer-id], .folder-row");
+      this.container.querySelectorAll(".drop-target").forEach(node => node.classList.remove("drop-target"));
+      if (!row || row.dataset.layerId === this.draggingId) return;
+      event.preventDefault();
+      row.classList.add("drop-target");
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
     });
-    this.container.addEventListener("dragleave", event => event.target.closest("[data-layer-id]")?.classList.remove("drop-target"));
+    this.container.addEventListener("dragleave", event => event.target.closest?.("[data-layer-id], .folder-row")?.classList.remove("drop-target"));
+    this.container.addEventListener("dragend", () => {
+      this.draggingId = null;
+      this.container.querySelectorAll(".drop-target").forEach(node => node.classList.remove("drop-target"));
+    });
     this.container.addEventListener("drop", event => {
       event.preventDefault();
-      const target = event.target.closest("[data-layer-id]");
-      if (!target) return;
-      target.classList.remove("drop-target");
-      this.callbacks.onMove?.(event.dataTransfer.getData("text/plain"), target.dataset.layerId);
+      this.container.querySelectorAll(".drop-target").forEach(node => node.classList.remove("drop-target"));
+      const id = (event.dataTransfer && event.dataTransfer.getData("text/plain")) || this.draggingId;
+      this.draggingId = null;
+      if (!id) return;
+      const layerRow = event.target.closest("[data-layer-id]");
+      const folderRow = event.target.closest(".folder-row");
+      if (layerRow && layerRow.dataset.layerId !== id) {
+        const target = this.layers.find(layer => layer.id === layerRow.dataset.layerId);
+        this.callbacks.onMove?.(id, {layerId: layerRow.dataset.layerId, folderId: target?.folder_id || null});
+        return;
+      }
+      if (folderRow) {
+        this.collapsed.delete(folderRow.dataset.folderId);
+        this.callbacks.onMove?.(id, {folderId: folderRow.dataset.folderId});
+      }
     });
   }
 
@@ -63,7 +83,7 @@ export class LayerTree {
       children.forEach(layer => grouped.add(layer.id));
       const collapsed = this.collapsed.has(folder.id);
       const hidden = this.hiddenFolders.has(folder.id);
-      html += `<div class="folder-row" data-folder-id="${folder.id}"><button type="button" class="folder-caret" data-action="collapse">${collapsed ? "▸" : "▾"}</button><button type="button" class="toggle visibility ${hidden ? "" : "on"}" data-action="folder-visibility">${hidden ? "○" : "◉"}</button><span class="folder-name">${escapeHtml(folder.name)}</span><span class="count">${children.length}</span></div>`;
+      html += `<div class="folder-row" data-folder-id="${folder.id}"><button type="button" class="folder-caret" data-action="collapse">${collapsed ? "▸" : "▾"}</button><button type="button" class="toggle visibility ${hidden ? "" : "on"}" data-action="folder-visibility">${hidden ? "○" : "◉"}</button><span class="folder-name">${escapeHtml(folder.name)}</span><span class="count">${children.length}</span><button type="button" class="toggle delete" data-action="delete-folder" aria-label="删除文件夹">删除</button></div>`;
       for (const layer of children) {
         html += this.row(layer, {
           child: true,
@@ -80,11 +100,51 @@ export class LayerTree {
     this.container.innerHTML = html;
   }
 
+  rename(event) {
+    const nameNode = event.target.closest(".layer-name");
+    if (!nameNode || nameNode.querySelector("input")) return;
+    const row = nameNode.closest("[data-layer-id]");
+    const layer = this.layers.find(item => item.id === row?.dataset.layerId);
+    if (!layer) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const input = document.createElement("input");
+    input.className = "layer-rename";
+    input.value = layer.name;
+    input.setAttribute("aria-label", "图层名称");
+    nameNode.replaceChildren(input);
+    input.focus();
+    input.select();
+    let closed = false;
+    const close = async commit => {
+      if (closed) return;
+      closed = true;
+      const value = input.value.trim();
+      input.remove();
+      nameNode.textContent = layer.name;
+      if (!commit || !value || value === layer.name) return;
+      await this.callbacks.onRename?.(layer.id, value);
+    };
+    input.addEventListener("blur", () => close(true));
+    input.addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        input.blur();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        close(false);
+      }
+    });
+  }
+
   click(event) {
     const folder = event.target.closest("[data-folder-id]");
     if (folder && !event.target.closest("[data-layer-id]")) {
       const id = folder.dataset.folderId;
-      if (event.target.dataset.action === "collapse") {
+      if (event.target.dataset.action === "delete-folder") {
+        this.callbacks.onDeleteFolder?.(id);
+        return;
+      } else if (event.target.dataset.action === "collapse") {
         this.collapsed.has(id) ? this.collapsed.delete(id) : this.collapsed.add(id);
       } else if (event.target.dataset.action === "folder-visibility") {
         this.hiddenFolders.has(id) ? this.hiddenFolders.delete(id) : this.hiddenFolders.add(id);

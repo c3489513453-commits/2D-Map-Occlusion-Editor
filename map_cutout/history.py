@@ -49,3 +49,6 @@ class HistoryManager:
     def clear(self) -> None:
         self._histories.clear()
 
+    def forget(self, map_id: str) -> None:
+        self._histories.pop(map_id, None)
+

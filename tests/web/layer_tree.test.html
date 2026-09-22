@@ -3,7 +3,7 @@
 import {LayerTree} from "/static/layer_tree.js";
 try{
  const layers=[{id:"original",name:"原始地图",kind:"original",visible:true,locked:true},{id:"a",name:"chair1",kind:"mask",mask_path:"a.png",visible:true,locked:false,folder_id:"f"},{id:"b",name:"door1",kind:"manual",mask_path:"b.png",visible:false,locked:false}];
- const selected=new Set();let deleted=null,edited=null;const tree=new LayerTree(document.querySelector("#tree"),{onSelect:(id,add)=>{if(!add)selected.clear();selected.add(id)},onDelete:id=>deleted=id,onEdit:id=>edited=id});
+ const selected=new Set();let deleted=null,edited=null,folderDeleted=null,moved=null,renamed=null;const tree=new LayerTree(document.querySelector("#tree"),{onSelect:(id,add)=>{if(!add)selected.clear();selected.add(id)},onDelete:id=>deleted=id,onEdit:id=>edited=id,onDeleteFolder:id=>folderDeleted=id,onMove:(id,target)=>moved={id,...target},onRename:(id,name)=>{renamed={id,name}}});
  tree.render(layers,[{id:"f",name:"家具",visible:true}],selected);
  const row=document.querySelector('[data-layer-id="a"]');const children=[...row.children];
  if(!children[0].classList.contains("visibility")||!children.at(-1).classList.contains("lock"))throw Error("按钮顺序错误");
@@ -20,6 +20,22 @@ try{
  if(selected.size!==2)throw Error("Shift 多选失败");
  const before=layers[0].visible;document.querySelector('[data-folder-id="f"] .visibility').click();
  if(layers[0].visible!==before||!document.querySelector('[data-layer-id="a"]').hidden)throw Error("文件夹显隐改变了图层自身状态");
+ const folderDelete=document.querySelector('[data-folder-id="f"] .delete');
+ if(!folderDelete||folderDelete.textContent.trim()!=="删除")throw Error("文件夹缺少删除按钮");
+ folderDelete.click();if(folderDeleted!=="f")throw Error("删除文件夹没有回调");
+ tree.draggingId="b";
+ document.querySelector('[data-folder-id="f"]').dispatchEvent(new DragEvent("drop",{bubbles:true,cancelable:true}));
+ if(!moved||moved.id!=="b"||moved.folderId!=="f")throw Error("拖到文件夹上没有放入文件夹");
+ tree.draggingId="b";moved=null;
+ document.querySelector('[data-layer-id="a"]').dispatchEvent(new DragEvent("drop",{bubbles:true,cancelable:true}));
+ if(!moved||moved.layerId!=="a"||moved.folderId!=="f")throw Error("拖到文件夹里的图层上没有跟着进入文件夹");
+ document.querySelector('[data-layer-id="b"] .layer-name').dispatchEvent(new MouseEvent("dblclick",{bubbles:true}));
+ const renameInput=document.querySelector(".layer-rename");
+ if(!renameInput||renameInput.value!=="door1")throw Error("双击图层名没有进入改名");
+ renameInput.value="城门";
+ renameInput.dispatchEvent(new FocusEvent("blur"));
+ await Promise.resolve();
+ if(!renamed||renamed.id!=="b"||renamed.name!=="城门")throw Error("改名没有提交");
  document.title="PASS";
 }catch(error){document.title="FAIL: "+error.message}
 </script>
