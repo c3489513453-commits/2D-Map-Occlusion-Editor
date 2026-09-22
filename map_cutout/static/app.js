@@ -12,6 +12,14 @@ const layerTree = new LayerTree($("#layer-tree"), {
   onSelect: (id, additive) => state.toggleLayerSelection(id, additive),
   onPatch: (id, changes) => action(async () => { await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`, changes); state.setDirty(true); await state.loadLayers(); }),
   onMove: (id, targetId) => action(async () => { const index=state.layers.findIndex(layer=>layer.id===targetId); await state.api.patch(`/api/maps/${state.currentMapId}/layers/${id}`, {index}); state.setDirty(true); await state.loadLayers(); }),
+  onDelete: id => action(async () => {
+    const layer = state.layers.find(item => item.id === id);
+    if (!layer || !confirm(`确定删除图层“${layer.name}”吗？可用 Ctrl+Z 撤销。`)) return;
+    await state.api.delete(`/api/maps/${state.currentMapId}/layers/${id}`);
+    state.selectedLayerIds.delete(id);
+    editor.maskImages.delete(id); editor.maskOverlays.delete(id);
+    state.setDirty(true); await state.loadLayers(); state.setStatus("图层已删除");
+  }),
 });
 
 function toast(message) {

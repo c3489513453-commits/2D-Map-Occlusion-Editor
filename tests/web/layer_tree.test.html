@@ -3,10 +3,12 @@
 import {LayerTree} from "/static/layer_tree.js";
 try{
  const layers=[{id:"original",name:"原始地图",kind:"original",visible:true,locked:true},{id:"a",name:"chair1",kind:"mask",visible:true,locked:false,folder_id:"f"},{id:"b",name:"door1",kind:"mask",visible:false,locked:false}];
- const selected=new Set();const tree=new LayerTree(document.querySelector("#tree"),{onSelect:(id,add)=>{if(!add)selected.clear();selected.add(id)}});
+ const selected=new Set();let deleted=null;const tree=new LayerTree(document.querySelector("#tree"),{onSelect:(id,add)=>{if(!add)selected.clear();selected.add(id)},onDelete:id=>deleted=id});
  tree.render(layers,[{id:"f",name:"家具",visible:true}],selected);
  const row=document.querySelector('[data-layer-id="a"]');const children=[...row.children];
  if(!children[0].classList.contains("visibility")||!children.at(-1).classList.contains("lock"))throw Error("按钮顺序错误");
+ if(!row.querySelector(".delete")||row.querySelector(".lock")!==children.at(-1))throw Error("删除按钮缺失或锁按钮不在最右侧");
+ row.querySelector(".delete").click();if(deleted!=="a")throw Error("删除回调失败");
  if(document.querySelectorAll(".layer-row").item(2).dataset.layerId!=="original")throw Error("原始地图未在最后");
  document.querySelector('[data-layer-id="a"] .layer-name').click();document.querySelector('[data-layer-id="b"] .layer-name').dispatchEvent(new MouseEvent("click",{bubbles:true,shiftKey:true}));
  if(selected.size!==2)throw Error("Shift 多选失败");
