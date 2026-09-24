@@ -137,7 +137,10 @@ export class CanvasEditor extends EventTarget {
 
   setMaskEdit(layerId) { this.maskEditLayerId = layerId || null; }
 
-  setWalkableLayers(layerIds) { this.walkableLayerIds = new Set(layerIds || []); }
+  setWalkableLayers(layerIds) {
+    this.walkableLayerIds = new Set(layerIds || []);
+    if (this.walkableLayerIds.size) this.walkableConfigured = true;
+  }
 
   setResourceMasks(layerIds) { this.resourceMaskIds = new Set(layerIds || []); }
 
@@ -742,9 +745,11 @@ export class CanvasEditor extends EventTarget {
   characterCanStand(position) {
     if (!this.character) return true;
     if (!this.walkableConfigured) return true;
-    if (!this.finalWalkableMask) return false;
+    const fallbackMasks = [...this.walkableLayerIds].map(id => this.maskImages.get(id)).filter(Boolean);
+    const masks = this.finalWalkableMask ? [this.finalWalkableMask] : fallbackMasks;
+    if (!masks.length) return false;
     return footprintIsWalkable(
-      (x, y) => this.maskContains(this.finalWalkableMask, x, y), position,
+      (x, y) => masks.some(mask => this.maskContains(mask, x, y)), position,
       this.character.footpoint, this.characterScale,
     );
   }
