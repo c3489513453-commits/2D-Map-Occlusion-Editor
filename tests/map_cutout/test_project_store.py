@@ -1,6 +1,8 @@
 from pathlib import Path
+import json
 
 import pytest
+import numpy as np
 from PIL import Image
 
 from map_cutout.project_store import (
@@ -66,3 +68,80 @@ def test_relocate_rejects_different_image_size(tmp_path):
 
     with pytest.raises(SourceSizeMismatch):
         store.relocate_source(map_state.id, replacement)
+
+
+def test_old_project_layers_default_to_no_occlusion_regions(tmp_path):
+    image_path = tmp_path / "地图.png"
+    write_image(image_path)
+    project_root = tmp_path / "项目"
+    project_root.mkdir()
+    (project_root / "project.json").write_text(json.dumps({
+        "name": "旧项目",
+        "maps": [{
+            "id": "map-1",
+            "source_path": str(image_path),
+            "width": 32,
+            "height": 24,
+            "layers": [{
+                "id": "layer-1",
+                "name": "树",
+                "kind": "mask",
+                "class_name": "tree",
+                "mask_path": "mask.png",
+            }],
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    loaded = ProjectStore.load(project_root)
+
+    assert loaded.state.maps[0].layers[0].occlusion_regions == []
+
+
+def test_save_and_load_preserves_occlusion_regions(tmp_path):
+    image_path = tmp_path / "地图.png"
+    write_image(image_path)
+    store = ProjectStore.create(tmp_path / "项目")
+    map_state = store.import_image(image_path)
+    layer = map_state.layers[0]
+    layer.occlusion_regions = [
+        [[1.5, 2.0], [12.0, 2.0], [8.0, 18.5]],
+        [[20.0, 4.0], [30.0, 4.0], [25.0, 16.0]],
+    ]
+
+    store.save()
+    loaded = ProjectStore.load(store.root)
+
+    assert loaded.state.maps[0].layers[0].occlusion_regions == layer.occlusion_regions
+
+
+def test_import_image_starts_without_walkable_layers(tmp_path):
+    image_path = tmp_path / "地图.png"
+    write_image(image_path, (32, 24))
+    store = ProjectStore.create(tmp_path / "项目")
+
+    map_state = store.import_image(image_path)
+
+    assert map_state.walkable_layers == []
+    assert map_state.walkable_folders == []
+    store.save()
+    loaded = ProjectStore.load(store.root)
+    assert loaded.state.maps[0].walkable_layers == []
+
+
+def test_legacy_walkable_mask_migrates_to_layer(tmp_path):
+    image_path = tmp_path / "地图.png"
+    write_image(image_path, (32, 24))
+    project_root = tmp_path / "项目"
+    mask_path = project_root / "masks" / "map-1" / "walkable.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.new("L", (32, 24), 255).save(mask_path)
+    (project_root / "project.json").write_text(json.dumps({
+        "name": "旧项目", "maps": [{"id": "map-1", "source_path": str(image_path),
+        "width": 32, "height": 24, "walkable_mask_path": str(mask_path), "layers": []}]
+    }, ensure_ascii=False), encoding="utf-8")
+
+    loaded = ProjectStore.load(project_root)
+
+    assert len(loaded.state.maps[0].walkable_layers) == 1
+    assert loaded.state.maps[0].walkable_layers[0].name == "行走区域"
+    assert loaded.state.maps[0].walkable_layers[0].mask_path == str(mask_path)

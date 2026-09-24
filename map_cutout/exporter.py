@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +68,7 @@ class BatchExportRequest:
     mode: str | ExportMode = ExportMode.TIGHT
     include_hidden: bool = True
     preserve_folders: bool = False
+    include_occlusion: bool = False
 
 
 @dataclass
@@ -74,6 +76,7 @@ class BatchExportReport:
     exported: list[Path] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     failures: list[dict] = field(default_factory=list)
+    occlusion_manifests: list[Path] = field(default_factory=list)
 
 
 class BatchExporter:
@@ -91,9 +94,32 @@ class BatchExporter:
             if len(maps) > 1:
                 map_dir = output_root / safe_windows_stem(Path(map_state.source_path).stem)
             folders = {folder.id: folder for folder in map_state.folders}
-            with Image.open(map_state.source_path) as opened:
-                source = opened.convert("RGB")
-            for layer in map_state.layers:
+            try:
+                with Image.open(map_state.source_path) as opened:
+                    source = opened.convert("RGB")
+            except FileNotFoundError:
+                report.failures.append({
+                    "map_id": map_state.id,
+                    "layer_id": "source",
+                    "name": Path(map_state.source_path).name,
+                    "reason": f"原图文件不存在：{map_state.source_path}",
+                })
+                continue
+            except Exception as exc:
+                report.failures.append({
+                    "map_id": map_state.id,
+                    "layer_id": "source",
+                    "name": Path(map_state.source_path).name,
+                    "reason": f"无法读取原图：{exc}",
+                })
+                continue
+            # A logic package already exports the required full-size occluders.
+            # Do not also emit the regular transparent assets at the output root.
+            if not request.include_occlusion:
+                layers_for_regular_export = map_state.layers
+            else:
+                layers_for_regular_export = []
+            for layer in layers_for_regular_export:
                 if request.layer_ids and layer.id not in request.layer_ids:
                     continue
                 if request.scope == "visible" and not layer.visible:
@@ -120,4 +146,86 @@ class BatchExporter:
                 except Exception as exc:
                     report.failures.append({"map_id": map_state.id, "layer_id": layer.id,
                                             "name": layer.name, "reason": str(exc)})
+            if request.include_occlusion:
+                self._export_occlusion_package(map_state, output_root, request, report)
         return report
+
+    def _export_occlusion_package(
+        self,
+        map_state,
+        output_root: Path,
+        request: BatchExportRequest,
+        report: BatchExportReport,
+    ) -> None:
+        package_dir = output_root / safe_windows_stem(Path(map_state.source_path).stem)
+        occluder_dir = package_dir / "occluders"
+        entries = []
+        with Image.open(map_state.source_path) as opened:
+            source = opened.convert("RGB")
+        package_dir.mkdir(parents=True, exist_ok=True)
+        map_output = package_dir / "map.png"
+        source.save(map_output, format="PNG")
+        report.exported.append(map_output)
+        for layer in map_state.layers:
+            if layer.kind == "original" or not layer.mask_path or not layer.occlusion_lines:
+                continue
+            if request.layer_ids and layer.id not in request.layer_ids:
+                continue
+            if request.scope == "visible" and not layer.visible:
+                continue
+            if not request.include_hidden and not layer.visible:
+                continue
+            try:
+                output = unique_windows_name(occluder_dir, layer.name)
+                mask = np.asarray(Image.open(layer.mask_path).convert("L")) > 0
+                export_layer(source, mask, output, ExportMode.FULL_SIZE)
+                report.exported.append(output)
+                entries.append({
+                    "id": layer.id,
+                    "name": layer.name,
+                    "image": output.relative_to(package_dir).as_posix(),
+                    "imageMode": "full_size",
+                    "lines": layer.occlusion_lines,
+                })
+            except Exception as exc:
+                report.failures.append({"map_id": map_state.id, "layer_id": layer.id,
+                                        "name": layer.name, "reason": str(exc)})
+        walkable_name = None
+        walkable_layers = [layer for layer in map_state.walkable_layers
+                           if layer.mask_path and (request.include_hidden or layer.visible)]
+        if walkable_layers:
+            try:
+                package_dir.mkdir(parents=True, exist_ok=True)
+                walkable_output = package_dir / "walkable.png"
+                combined = np.zeros((map_state.height, map_state.width), dtype=bool)
+                for layer in walkable_layers:
+                    combined |= np.asarray(Image.open(layer.mask_path).convert("L")) > 0
+                Image.fromarray((combined * 255).astype(np.uint8), mode="L").save(walkable_output)
+                report.exported.append(walkable_output)
+                walkable_name = walkable_output.name
+            except Exception as exc:
+                report.failures.append({"map_id": map_state.id, "layer_id": "walkable",
+                                        "name": "行走区域", "reason": str(exc)})
+        if not entries and not walkable_name:
+            return
+        package_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = package_dir / "occlusion.json"
+        manifest_path.write_text(json.dumps({
+            "version": 2,
+            "map": {
+                "width": map_state.width,
+                "height": map_state.height,
+                "coordinateOrigin": "top-left",
+                "image": map_output.name,
+            },
+            "walkableMask": walkable_name,
+            "walkable": ({
+                "mask": walkable_name,
+                "rule": "character_footprint_must_be_inside",
+                "layers": [{"id": layer.id, "name": layer.name}
+                           for layer in walkable_layers],
+            } if walkable_name else None),
+            "occluders": entries,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        report.exported.append(manifest_path)
+        report.occlusion_manifests.append(manifest_path)

@@ -27,6 +27,8 @@ class LayerState:
     visible: bool = True
     locked: bool = False
     folder_id: str | None = None
+    occlusion_regions: list[list[list[float]]] = field(default_factory=list)
+    occlusion_lines: list[list[list[float]]] = field(default_factory=list)
 
     @classmethod
     def mask_layer(
@@ -49,8 +51,11 @@ class MapState:
     source_path: str
     width: int
     height: int
+    walkable_mask_path: str | None = None
     layers: list[LayerState] = field(default_factory=list)
     folders: list[FolderState] = field(default_factory=list)
+    walkable_layers: list[LayerState] = field(default_factory=list)
+    walkable_folders: list[FolderState] = field(default_factory=list)
     prompt: str = ""
     threshold: float = 0.4
 
@@ -94,6 +99,8 @@ class ProjectState:
     maps: list[MapState] = field(default_factory=list)
     current_map_id: str | None = None
     version: int = 1
+    character_path: str | None = None
+    character_scale: float = 1.0
 
     def map_by_id(self, map_id: str) -> MapState:
         for map_state in self.maps:

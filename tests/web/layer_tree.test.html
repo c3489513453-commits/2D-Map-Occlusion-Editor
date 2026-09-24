@@ -1,20 +1,25 @@
 <!doctype html><meta charset="utf-8"><title>RUNNING</title><div id="tree"></div>
 <script type="module">
-import {LayerTree} from "/static/layer_tree.js";
+import {LayerTree} from "/static/layer_tree.js?v=baseline-interaction1";
 try{
- const layers=[{id:"original",name:"原始地图",kind:"original",visible:true,locked:true},{id:"a",name:"chair1",kind:"mask",mask_path:"a.png",visible:true,locked:false,folder_id:"f"},{id:"b",name:"door1",kind:"manual",mask_path:"b.png",visible:false,locked:false}];
- const selected=new Set();let deleted=null,edited=null,folderDeleted=null,moved=null,renamed=null;const tree=new LayerTree(document.querySelector("#tree"),{onSelect:(id,add)=>{if(!add)selected.clear();selected.add(id)},onDelete:id=>deleted=id,onEdit:id=>edited=id,onDeleteFolder:id=>folderDeleted=id,onMove:(id,target)=>moved={id,...target},onRename:(id,name)=>{renamed={id,name}}});
- tree.render(layers,[{id:"f",name:"家具",visible:true}],selected);
+ const layers=[{id:"original",name:"原始地图",kind:"original",visible:true,locked:true},{id:"a",name:"chair1",kind:"mask",mask_path:"a.png",visible:true,locked:false,folder_id:"f",occlusion_lines:[]},{id:"b",name:"door1",kind:"manual",mask_path:"b.png",visible:false,locked:false,occlusion_lines:[[[1,5],[5,5]]]}];
+ const selected=new Set();let deleted=null,edited=null,folderDeleted=null,moved=null,renamed=null,drawn=null,toggled=null,cleared=null;const tree=new LayerTree(document.querySelector("#tree"),{onSelect:(id,add)=>{if(!add)selected.clear();selected.add(id)},onDelete:id=>deleted=id,onEdit:id=>edited=id,onDrawOcclusion:id=>drawn=id,onToggleOcclusionInfo:(id,hidden)=>toggled={id,hidden},onClearOcclusion:id=>cleared=id,onDeleteFolder:id=>folderDeleted=id,onMove:(id,target)=>moved={id,...target},onRename:(id,name)=>{renamed={id,name}}});
+ tree.render(layers,[{id:"f",name:"家具",visible:true}],selected,null,"a");
  const row=document.querySelector('[data-layer-id="a"]');const children=[...row.children];
- if(!children[0].classList.contains("visibility")||!children.at(-1).classList.contains("lock"))throw Error("按钮顺序错误");
- if(!row.querySelector(".delete")||row.querySelector(".lock")!==children.at(-1))throw Error("删除按钮缺失或锁按钮不在最右侧");
- if(!row.querySelector(".edit")||row.querySelector(".edit").textContent.trim()!=="继续编辑")throw Error("已有蒙版缺少继续编辑");
- if(document.querySelector('[data-layer-id="original"] .edit'))throw Error("底图不应出现继续编辑");
- if(document.querySelector('[data-layer-id="b"] .edit').textContent.trim()!=="继续编辑")throw Error("手动蒙版也应能继续编辑");
+ if(!children[0].classList.contains("visibility")||!children.at(-1).classList.contains("occlusion-info"))throw Error("按钮顺序错误");
+ if(!row.querySelector(".delete")||row.querySelector(".occlusion-info")!==children.at(-1))throw Error("删除按钮缺失或遮挡圆点不在最右侧");
+ if(row.querySelector(".layer-kind"))throw Error("不应再显示蒙版文字");
+ if(!row.querySelector(".edit")||row.querySelector(".edit").textContent.trim()!=="编辑")throw Error("已有蒙版缺少编辑按钮");
+ if(!row.querySelector(".draw-occlusion")||row.querySelector(".draw-occlusion").textContent.trim()!=="退出编辑")throw Error("正在编辑的底线按钮没有变为退出编辑");
+ if(document.querySelector('[data-layer-id="original"] .edit'))throw Error("底图不应出现编辑按钮");
+ if(document.querySelector('[data-layer-id="b"] .edit').textContent.trim()!=="编辑")throw Error("手动蒙版也应能编辑");
  row.querySelector(".edit").click();if(edited!=="a")throw Error("继续编辑回调失败");
+ row.querySelector(".draw-occlusion").click();if(drawn!=="a")throw Error("绘制遮挡回调失败");
+ row.querySelector(".occlusion-info").click();if(!toggled||toggled.id!=="a"||!toggled.hidden)throw Error("遮挡信息显隐回调失败");
+ document.querySelector('[data-layer-id="b"] .clear-occlusion').click();if(cleared!=="b")throw Error("清除遮挡回调失败");
  const manualDelete=document.querySelector('[data-layer-id="b"] .delete');
  if(!manualDelete||manualDelete.textContent.trim()!=="删除")throw Error("手动蒙版缺少清晰可见的删除按钮");
- row.querySelector(".delete").click();if(deleted!=="a")throw Error("删除回调失败");
+ document.querySelector('[data-layer-id="a"] .delete').click();if(deleted!=="a")throw Error("删除回调失败");
  if(document.querySelectorAll(".layer-row").item(2).dataset.layerId!=="original")throw Error("原始地图未在最后");
  document.querySelector('[data-layer-id="a"] .layer-name').click();document.querySelector('[data-layer-id="b"] .layer-name').dispatchEvent(new MouseEvent("click",{bubbles:true,shiftKey:true}));
  if(selected.size!==2)throw Error("Shift 多选失败");

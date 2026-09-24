@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import shutil
 import threading
+import math
+import base64
+import io
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -16,16 +19,18 @@ from .commands import (
     AssignLayerFolderCommand, CreateFolderCommand, CreateLayerCommand, DeleteFolderCommand,
     DeleteLayerCommand,
     MergeLayersCommand, MoveLayerCommand, RenameLayerCommand, SetLayerLockCommand,
-    SetLayerVisibilityCommand,
+    SetLayerVisibilityCommand, SetOcclusionRegionsCommand, SetOcclusionLinesCommand,
+    SetManyOcclusionLinesCommand,
 )
 from .config import AppConfig
-from .domain import BoundingBox, ExportMode, LayerState
+from .domain import BoundingBox, ExportMode, FolderState, LayerState
 from .exporter import BatchExportRequest, BatchExporter, export_layer, unique_windows_name
 from .history import HistoryManager
 from .inference import InferenceService
 from .jobs import JobManager
 from .masks import paint_circle, paint_polygon, take_unoccupied, to_mask_image
-from .project_store import ProjectStore
+from .occlusion import baseline_lines_from_mask
+from .project_store import ProjectStore, load_startup_project, remember_project
 
 
 class DiskMaskRepository:
@@ -53,6 +58,61 @@ def occupied_mask(state, repository, skip_layer_id: str | None = None) -> np.nda
         if layer.mask_path and layer.id != skip_layer_id:
             occupied |= repository.load(layer.mask_path)
     return occupied
+
+
+def validated_regions(raw, width: int, height: int) -> list[list[list[float]]]:
+    if not isinstance(raw, list):
+        raise ValueError("遮挡区域格式不正确")
+    normalized = []
+    for region in raw:
+        if not isinstance(region, list) or len(region) < 3:
+            raise ValueError("遮挡区域格式不正确")
+        points = []
+        for point in region:
+            if not isinstance(point, list) or len(point) != 2:
+                raise ValueError("遮挡区域格式不正确")
+            x, y = point
+            if (isinstance(x, bool) or isinstance(y, bool)
+                    or not isinstance(x, (int, float)) or not isinstance(y, (int, float))
+                    or not math.isfinite(x) or not math.isfinite(y)
+                    or not 0 <= x <= width or not 0 <= y <= height):
+                raise ValueError("遮挡区域格式不正确")
+            points.append([float(x), float(y)])
+        if len({(point[0], point[1]) for point in points}) < 3:
+            raise ValueError("遮挡区域格式不正确")
+        twice_area = sum(
+            points[index][0] * points[(index + 1) % len(points)][1]
+            - points[(index + 1) % len(points)][0] * points[index][1]
+            for index in range(len(points))
+        )
+        if abs(twice_area) < 1e-7:
+            raise ValueError("遮挡区域格式不正确")
+        normalized.append(points)
+    return normalized
+
+
+def validated_lines(raw, width: int, height: int) -> list[list[list[float]]]:
+    if not isinstance(raw, list):
+        raise ValueError("底线格式不正确")
+    normalized = []
+    for line in raw:
+        if not isinstance(line, list) or len(line) < 2:
+            raise ValueError("底线格式不正确")
+        points = []
+        for point in line:
+            if not isinstance(point, list) or len(point) != 2:
+                raise ValueError("底线格式不正确")
+            x, y = point
+            if (isinstance(x, bool) or isinstance(y, bool)
+                    or not isinstance(x, (int, float)) or not isinstance(y, (int, float))
+                    or not math.isfinite(x) or not math.isfinite(y)
+                    or not 0 <= x <= width or not 0 <= y <= height):
+                raise ValueError("底线格式不正确")
+            points.append([float(x), float(y)])
+        if len({(point[0], point[1]) for point in points}) < 2:
+            raise ValueError("底线格式不正确")
+        normalized.append(points)
+    return normalized
 
 
 class _BatchCreate:
@@ -113,7 +173,7 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
     if not _loopback(config.host):
         raise ValueError("为保护本地文件，仅允许本机地址 127.0.0.1")
     if services is None:
-        project = ProjectStore.create(config.project_root / "未命名项目", "未命名项目")
+        project = load_startup_project(config.project_root)
         services = AppServices(project, InferenceService.default(config), JobManager(1))
     app = FastAPI(title="地图抠图工具")
     app.state.services = services
@@ -167,12 +227,14 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
     @app.post("/api/projects/open")
     def open_project(payload: dict = Body(...)):
         services.project = ProjectStore.load(Path(payload["path"]))
+        remember_project(config.project_root, services.project)
         services.histories.clear()
         return services.project.state.to_dict()
 
     @app.post("/api/projects/save")
     def save_project():
         services.project.save()
+        remember_project(config.project_root, services.project)
         return {"saved": True, "path": str(services.project.manifest_path)}
 
     @app.post("/api/import/image")
@@ -204,10 +266,130 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
     def map_image(map_id: str):
         return FileResponse(map_state(map_id).source_path)
 
+    @app.get("/api/character/info")
+    def character_info():
+        path = services.project.state.character_path
+        return {"available": bool(path and Path(path).is_file()),
+                "scale": services.project.state.character_scale}
+
+    @app.get("/api/character")
+    def character_image():
+        path = services.project.state.character_path
+        if not path or not Path(path).is_file(): raise HTTPException(404, "项目还没有测试小人")
+        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+    @app.delete("/api/character")
+    def delete_character():
+        path = services.project.state.character_path
+        if path:
+            Path(path).unlink(missing_ok=True)
+        services.project.state.character_path = None
+        services.project.dirty = True
+        return {"deleted": bool(path)}
+
+    @app.put("/api/character")
+    def save_character(payload: dict = Body(...)):
+        try:
+            raw = base64.b64decode(payload.get("png_base64", ""), validate=True)
+        except Exception:
+            raise HTTPException(400, "小人 PNG 数据不正确")
+        if not raw or len(raw) > 10 * 1024 * 1024: raise HTTPException(400, "小人 PNG 不能超过 10MB")
+        try:
+            with Image.open(io.BytesIO(raw)) as opened:
+                if opened.format != "PNG": raise ValueError
+                image = opened.convert("RGBA")
+                if not np.asarray(image)[:, :, 3].any(): raise HTTPException(400, "小人图片完全透明")
+                assets = services.project.root / "assets"; assets.mkdir(exist_ok=True)
+                path = assets / "character.png"; image.save(path)
+        except HTTPException: raise
+        except Exception: raise HTTPException(400, "无法读取小人 PNG")
+        services.project.state.character_path = str(path)
+        services.project.state.character_scale = max(.1, min(5.0, float(payload.get("scale", 1))))
+        services.project.dirty = True
+        return {"saved": True, "scale": services.project.state.character_scale}
+
+    @app.patch("/api/character")
+    def patch_character(payload: dict = Body(...)):
+        services.project.state.character_scale = max(.1, min(5.0, float(payload.get("scale", 1))))
+        services.project.dirty = True
+        return {"scale": services.project.state.character_scale}
+
     @app.get("/api/maps/{map_id}/layers")
     def layers(map_id: str):
         state = map_state(map_id)
         return [asdict(item) for item in state.layers]
+
+    def walkable_layer(state, layer_id: str):
+        for layer in state.walkable_layers:
+            if layer.id == layer_id:
+                return layer
+        raise HTTPException(404, "行走图层不存在")
+
+    @app.get("/api/maps/{map_id}/walkable/layers")
+    def walkable_layers(map_id: str):
+        state = map_state(map_id)
+        return {"layers": [asdict(item) for item in state.walkable_layers],
+                "folders": [asdict(item) for item in state.walkable_folders]}
+
+    @app.post("/api/maps/{map_id}/walkable/layers")
+    def create_walkable_layer(map_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        layer_id = uuid4().hex
+        name = " ".join(str(payload.get("name") or "新行走图层").split()) or "新行走图层"
+        existing = {item.name for item in state.walkable_layers}
+        base, number = name, 2
+        while name in existing:
+            name = f"{base}{number}"; number += 1
+        repository = DiskMaskRepository(services.project, map_id)
+        path = repository.save(f"walkable-{layer_id}", np.zeros((state.height, state.width), dtype=np.uint8))
+        layer = LayerState(layer_id, name, "walkable", mask_path=path)
+        state.walkable_layers.insert(0, layer)
+        services.project.dirty = True
+        return asdict(layer)
+
+    @app.get("/api/maps/{map_id}/walkable/layers/{layer_id}/mask")
+    def walkable_layer_mask(map_id: str, layer_id: str):
+        layer = walkable_layer(map_state(map_id), layer_id)
+        return FileResponse(layer.mask_path, media_type="image/png",
+                            headers={"Cache-Control": "no-store"})
+
+    @app.patch("/api/maps/{map_id}/walkable/layers/{layer_id}")
+    def patch_walkable_layer(map_id: str, layer_id: str, payload: dict = Body(...)):
+        state = map_state(map_id); layer = walkable_layer(state, layer_id)
+        if "name" in payload: layer.name = " ".join(str(payload["name"]).split()) or layer.name
+        if "visible" in payload: layer.visible = bool(payload["visible"])
+        if "folder_id" in payload: layer.folder_id = payload["folder_id"]
+        if "index" in payload:
+            state.walkable_layers.remove(layer)
+            state.walkable_layers.insert(max(0, min(int(payload["index"]), len(state.walkable_layers))), layer)
+        services.project.dirty = True
+        return asdict(layer)
+
+    @app.delete("/api/maps/{map_id}/walkable/layers/{layer_id}")
+    def delete_walkable_layer(map_id: str, layer_id: str):
+        state = map_state(map_id); layer = walkable_layer(state, layer_id)
+        state.walkable_layers.remove(layer)
+        if layer.mask_path: Path(layer.mask_path).unlink(missing_ok=True)
+        services.project.dirty = True
+        return {"deleted": True}
+
+    @app.post("/api/maps/{map_id}/walkable/folders")
+    def create_walkable_folder(map_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        folder = FolderState(uuid4().hex, str(payload.get("name") or "新文件夹"))
+        state.walkable_folders.append(folder); services.project.dirty = True
+        return asdict(folder)
+
+    @app.delete("/api/maps/{map_id}/walkable/folders/{folder_id}")
+    def delete_walkable_folder(map_id: str, folder_id: str):
+        state = map_state(map_id)
+        folder = next((item for item in state.walkable_folders if item.id == folder_id), None)
+        if not folder: raise HTTPException(404, "文件夹不存在")
+        state.walkable_folders.remove(folder)
+        for layer in state.walkable_layers:
+            if layer.folder_id == folder_id: layer.folder_id = None
+        services.project.dirty = True
+        return {"deleted": True}
 
     @app.get("/api/maps/{map_id}/layers/{layer_id}/mask")
     def layer_mask(map_id: str, layer_id: str):
@@ -216,6 +398,17 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
             raise HTTPException(404, "此图层没有蒙版")
         return FileResponse(
             layer.mask_path,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/api/maps/{map_id}/walkable/mask")
+    def walkable_mask(map_id: str):
+        state = map_state(map_id)
+        if not state.walkable_mask_path:
+            raise HTTPException(404, "这张地图还没有行走区域")
+        return FileResponse(
+            state.walkable_mask_path,
             media_type="image/png",
             headers={"Cache-Control": "no-store"},
         )
@@ -269,7 +462,8 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
                 mask = services.inference.segment_points(
                     image, payload["points"], payload["labels"], box)
             repository = DiskMaskRepository(services.project, map_id)
-            mask = take_unoccupied(mask, occupied_mask(state, repository))
+            if payload.get("target_kind") != "walkable":
+                mask = take_unoccupied(mask, occupied_mask(state, repository))
             if not mask.any():
                 return {"preview_id": None, "empty": True}
             preview_id = uuid4().hex
@@ -286,8 +480,6 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
     def segment_add(map_id: str, layer_id: str, payload: dict = Body(...)):
         state = map_state(map_id)
         layer = state.layer(layer_id)
-        if layer.locked:
-            raise HTTPException(409, "图层已锁定")
         if not layer.mask_path:
             raise HTTPException(404, "此图层没有蒙版")
         box = payload.get("box")
@@ -301,18 +493,39 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
             repository = DiskMaskRepository(services.project, map_id)
             with services.mask_lock(f"{map_id}:{layer_id}"):
                 before = repository.load(layer.mask_path)
-                fresh = take_unoccupied(recognized, occupied_mask(state, repository, layer_id))
-                new_pixels = fresh & ~before
+                recognized = np.asarray(recognized, dtype=bool)
+                new_pixels = recognized & ~before
                 if not new_pixels.any():
-                    if not np.asarray(recognized).any():
-                        reason = "empty"
-                    elif not fresh.any():
-                        reason = "occupied"
-                    else:
-                        reason = "already"
+                    reason = "empty" if not recognized.any() else "already"
                     return {"added": False, "reason": reason}
                 history(map_id).execute(_EditMask(
-                    repository, layer.mask_path, before, before | new_pixels))
+                    repository, layer.mask_path, before, before | recognized))
+            services.project.dirty = True
+            return {"added": True}
+
+        return {"job_id": services.jobs.submit(work)}
+
+    @app.post("/api/maps/{map_id}/walkable/layers/{layer_id}/segment-add")
+    def segment_add_walkable(map_id: str, layer_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        layer = walkable_layer(state, layer_id)
+        box = payload.get("box")
+        if not isinstance(box, list) or len(box) != 4:
+            raise HTTPException(400, "请先框选一块区域")
+
+        def work():
+            with Image.open(state.source_path) as opened:
+                image = opened.convert("RGB")
+            recognized = np.asarray(
+                services.inference.segment_box(image, BoundingBox(*box)), dtype=bool)
+            repository = DiskMaskRepository(services.project, map_id)
+            with services.mask_lock(f"{map_id}:walkable:{layer_id}"):
+                before = repository.load(layer.mask_path)
+                if not (recognized & ~before).any():
+                    return {"added": False,
+                            "reason": "empty" if not recognized.any() else "already"}
+                history(map_id).execute(_EditMask(
+                    repository, layer.mask_path, before, before | recognized))
             services.project.dirty = True
             return {"added": True}
 
@@ -356,8 +569,6 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
     def paint_layer(map_id: str, layer_id: str, payload: dict = Body(...)):
         state = map_state(map_id)
         layer = state.layer(layer_id)
-        if layer.locked:
-            raise HTTPException(409, "图层已锁定")
         repository = DiskMaskRepository(services.project, map_id)
         with services.mask_lock(f"{map_id}:{layer_id}"):
             before = repository.load(layer.mask_path)
@@ -377,6 +588,30 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         services.project.dirty = True
         return {"updated": True}
 
+    @app.post("/api/maps/{map_id}/walkable/layers/{layer_id}/paint")
+    def paint_walkable(map_id: str, layer_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        layer = walkable_layer(state, layer_id)
+        repository = DiskMaskRepository(services.project, map_id)
+        with services.mask_lock(f"{map_id}:walkable:{layer_id}"):
+            before = repository.load(layer.mask_path)
+            after = before.copy()
+            points = payload.get("points", [])
+            if payload.get("shape") == "polygon":
+                after = paint_polygon(after, points, int(payload.get("value", 255)))
+            else:
+                for start, end in zip(points, points[1:] or points):
+                    distance = max(abs(end[0]-start[0]), abs(end[1]-start[1]), 1)
+                    for step in range(int(distance)+1):
+                        ratio = step / distance
+                        after = paint_circle(after, start[0]+(end[0]-start[0])*ratio,
+                                             start[1]+(end[1]-start[1])*ratio,
+                                             float(payload.get("radius", 10)), int(payload.get("value", 255)))
+            history(map_id).execute(_EditMask(
+                repository, layer.mask_path, before, after))
+        services.project.dirty = True
+        return {"updated": True}
+
     @app.patch("/api/maps/{map_id}/layers/{layer_id}")
     def patch_layer(map_id: str, layer_id: str, payload: dict = Body(...)):
         state = map_state(map_id)
@@ -391,6 +626,75 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
             history(map_id).execute(MoveLayerCommand(state, layer_id, int(payload["index"])))
         services.project.dirty = True
         return asdict(state.layer(layer_id))
+
+    @app.put("/api/maps/{map_id}/layers/{layer_id}/occlusion-regions")
+    def put_occlusion_regions(map_id: str, layer_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        try:
+            layer = state.layer(layer_id)
+        except KeyError:
+            raise HTTPException(404, "图层不存在")
+        if layer.kind == "original" or not layer.mask_path:
+            raise HTTPException(400, "只有蒙版图层可以绘制遮挡区域")
+        try:
+            regions = validated_regions(payload.get("regions"), state.width, state.height)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "遮挡区域格式不正确")
+        history(map_id).execute(SetOcclusionRegionsCommand(state, layer_id, regions))
+        services.project.dirty = True
+        return asdict(layer)
+
+    @app.post("/api/maps/{map_id}/walkable/layers/{layer_id}/segment-commit")
+    def commit_segment_walkable(map_id: str, layer_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        layer = walkable_layer(state, layer_id)
+        preview = services.previews.pop(payload.get("preview_id"), None)
+        if not preview or preview["map_id"] != map_id:
+            raise HTTPException(404, "预览不存在或不属于当前地图")
+        repository = DiskMaskRepository(services.project, map_id)
+        with services.mask_lock(f"{map_id}:walkable:{layer_id}"):
+            before = repository.load(layer.mask_path)
+            history(map_id).execute(_EditMask(
+                repository, layer.mask_path, before,
+                before | np.asarray(preview["mask"], dtype=bool)))
+        Path(preview["path"]).unlink(missing_ok=True)
+        services.project.dirty = True
+        return asdict(layer)
+
+    @app.put("/api/maps/{map_id}/layers/{layer_id}/occlusion-lines")
+    def put_occlusion_lines(map_id: str, layer_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        try:
+            layer = state.layer(layer_id)
+        except KeyError:
+            raise HTTPException(404, "图层不存在")
+        if layer.kind == "original" or not layer.mask_path:
+            raise HTTPException(400, "只有蒙版图层可以编辑底线")
+        try:
+            lines = validated_lines(payload.get("lines"), state.width, state.height)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "底线格式不正确")
+        history(map_id).execute(SetOcclusionLinesCommand(state, layer_id, lines))
+        services.project.dirty = True
+        return asdict(layer)
+
+    @app.post("/api/maps/{map_id}/occlusion-lines/auto")
+    def auto_occlusion_lines(map_id: str):
+        state = map_state(map_id)
+        changes = []
+        for layer in state.layers:
+            if layer.kind == "original" or not layer.mask_path or layer.occlusion_lines:
+                continue
+            mask = np.asarray(Image.open(layer.mask_path).convert("L"))
+            lines = baseline_lines_from_mask(mask)
+            if lines:
+                changes.append((layer, lines))
+        if changes:
+            history(map_id).execute(SetManyOcclusionLinesCommand(changes))
+            services.project.dirty = True
+        return {"created": len(changes), "skipped": sum(
+            1 for layer in state.layers if layer.mask_path and layer.occlusion_lines
+        )}
 
     @app.delete("/api/maps/{map_id}/layers/{layer_id}")
     def delete_layer(map_id: str, layer_id: str):
@@ -458,9 +762,11 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
             output_dir=destination, scope=payload.get("scope", "map"), map_ids=map_ids,
             layer_ids=layer_ids, mode=payload.get("mode", "tight"),
             include_hidden=bool(payload.get("include_hidden", True)),
-            preserve_folders=bool(payload.get("preserve_folders", False))))
+            preserve_folders=bool(payload.get("preserve_folders", False)),
+            include_occlusion=bool(payload.get("include_occlusion", False))))
         return {"exported": [str(path) for path in report.exported],
                 "skipped": report.skipped, "failures": report.failures,
+                "occlusion_manifests": [str(path) for path in report.occlusion_manifests],
                 "output_dir": str(destination)}
 
     @app.get("/api/jobs/{job_id}")

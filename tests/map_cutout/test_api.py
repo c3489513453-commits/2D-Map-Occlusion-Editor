@@ -1,4 +1,6 @@
 import time
+import base64
+import io
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +13,7 @@ from map_cutout.domain import LayerState
 from map_cutout.jobs import JobManager
 from map_cutout.project_store import ProjectStore
 from map_cutout.web_app import AppServices, DiskMaskRepository, create_app
+import map_cutout.web_app as web_app
 
 
 class FakeInference:
@@ -54,6 +57,54 @@ def test_maps_and_layers_are_available(tmp_path):
     layers = client.get(f"/api/maps/{map_id}/layers").json()
     assert layers[0]["kind"] == "original"
     assert client.get(f"/api/maps/{map_id}/image").status_code == 200
+
+
+def test_page_has_resource_and_walkable_layer_switch(tmp_path):
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), services(tmp_path)))
+
+    html = client.get("/").text
+
+    assert 'id="layer-mode"' in html
+    assert 'data-mode="resources"' in html
+    assert 'data-mode="walkable"' in html
+
+
+def test_character_png_and_scale_persist_in_project(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    buffer = io.BytesIO()
+    Image.new("RGBA", (8, 12), (255, 0, 0, 255)).save(buffer, format="PNG")
+
+    saved = client.put("/api/character", json={
+        "png_base64": base64.b64encode(buffer.getvalue()).decode("ascii"), "scale": 1.5,
+    })
+
+    assert saved.status_code == 200
+    assert client.get("/api/character").status_code == 200
+    assert app_services.project.state.character_scale == 1.5
+    app_services.project.save()
+    loaded = ProjectStore.load(app_services.project.root)
+    assert Path(loaded.state.character_path).is_file()
+    assert loaded.state.character_scale == 1.5
+
+
+def test_character_can_be_deleted_from_project(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    buffer = io.BytesIO()
+    Image.new("RGBA", (8, 12), (255, 0, 0, 255)).save(buffer, format="PNG")
+    client.put("/api/character", json={
+        "png_base64": base64.b64encode(buffer.getvalue()).decode("ascii"), "scale": 1,
+    })
+    path = Path(app_services.project.state.character_path)
+
+    response = client.delete("/api/character")
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+    assert app_services.project.state.character_path is None
+    assert not path.exists()
+    assert client.get("/api/character/info").json()["available"] is False
 
 
 def test_cuda_oom_becomes_chinese_failed_job_without_layers(tmp_path):
@@ -151,6 +202,249 @@ def test_blank_layer_can_be_painted_without_a_prior_region(tmp_path):
     assert mask[0, 0] == 0
     after = client.get(f"/api/maps/{map_state.id}/layers").json()
     assert len(after) == len(before) + 1
+
+
+def test_walkable_mask_is_independent_and_can_be_painted(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+
+    created = client.post(f"/api/maps/{map_state.id}/walkable/layers", json={"name": "道路"}).json()
+    response = client.post(
+        f"/api/maps/{map_state.id}/walkable/layers/{created['id']}/paint",
+        json={"shape": "polygon", "points": [[2, 2], [12, 2], [12, 10], [2, 10]], "value": 255},
+    )
+
+    assert response.status_code == 200
+    mask = np.asarray(Image.open(created["mask_path"]).convert("L"))
+    assert mask[5, 5] == 255
+    assert mask[0, 0] == 0
+    assert client.get(f"/api/maps/{map_state.id}/walkable/layers/{created['id']}/mask").status_code == 200
+    assert [layer.kind for layer in map_state.layers] == ["original"]
+
+    folder = client.post(f"/api/maps/{map_state.id}/walkable/folders", json={"name": "一楼"}).json()
+    patched = client.patch(
+        f"/api/maps/{map_state.id}/walkable/layers/{created['id']}",
+        json={"name": "主路", "visible": False, "folder_id": folder["id"]},
+    ).json()
+    assert patched["name"] == "主路"
+    assert patched["visible"] is False
+    assert patched["folder_id"] == folder["id"]
+
+
+def test_box_recognition_can_be_added_to_a_walkable_layer(tmp_path):
+    app_services = services(tmp_path)
+    map_state = app_services.project.state.maps[0]
+
+    class FullBox:
+        def segment_box(self, image, box):
+            return np.ones((image.height, image.width), dtype=bool)
+
+    app_services.inference = FullBox()
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    layer = client.post(
+        f"/api/maps/{map_state.id}/walkable/layers", json={"name": "道路"}
+    ).json()
+
+    job = wait_for_job(client, client.post(
+        f"/api/maps/{map_state.id}/walkable/layers/{layer['id']}/segment-add",
+        json={"box": [0, 0, map_state.width, map_state.height]},
+    ).json()["job_id"])
+
+    assert job["state"] == "completed"
+    assert job["result"]["added"] is True
+    assert int(np.asarray(Image.open(layer["mask_path"]).convert("L")).min()) == 255
+    assert [item.kind for item in map_state.layers] == ["original"]
+
+
+def test_point_preview_can_commit_into_walkable_layer_without_resource_exclusion(tmp_path):
+    app_services = services(tmp_path)
+    map_state = app_services.project.state.maps[0]
+
+    class FullPoints:
+        def segment_points(self, image, points, labels, box):
+            return np.ones((image.height, image.width), dtype=bool)
+
+    app_services.inference = FullPoints()
+    repository = DiskMaskRepository(app_services.project, map_state.id)
+    occupied = repository.save("resource", np.ones((map_state.height, map_state.width), dtype=bool))
+    map_state.layers.append(LayerState.mask_layer("resource", "资源", "object", occupied))
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    layer = client.post(
+        f"/api/maps/{map_state.id}/walkable/layers", json={"name": "道路"}
+    ).json()
+
+    preview_job = wait_for_job(client, client.post(
+        f"/api/maps/{map_state.id}/segment",
+        json={"points": [[4, 4]], "labels": [1], "target_kind": "walkable"},
+    ).json()["job_id"])
+    assert preview_job["result"]["preview_id"]
+    committed = client.post(
+        f"/api/maps/{map_state.id}/walkable/layers/{layer['id']}/segment-commit",
+        json={"preview_id": preview_job["result"]["preview_id"]},
+    )
+
+    assert committed.status_code == 200
+    assert int(np.asarray(Image.open(layer["mask_path"]).convert("L")).min()) == 255
+
+
+def test_legacy_locked_mask_can_still_be_edited_after_lock_control_is_removed(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={}).json()
+    map_state.layer(created["id"]).locked = True
+
+    response = client.post(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/paint",
+        json={"points": [[3, 3]], "radius": 2, "value": 255},
+    )
+
+    assert response.status_code == 200
+
+
+def test_occlusion_regions_can_be_saved_and_undone(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={}).json()
+    regions = [[[1, 1], [20, 1], [20, 12], [1, 12]]]
+
+    updated = client.put(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/occlusion-regions",
+        json={"regions": regions},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["occlusion_regions"] == regions
+    assert app_services.project.dirty is True
+    undone = client.post(f"/api/maps/{map_state.id}/undo")
+    assert undone.status_code == 200
+    layer = client.get(f"/api/maps/{map_state.id}/layers").json()[0]
+    assert layer["id"] == created["id"]
+    assert layer["occlusion_regions"] == []
+
+
+def test_occlusion_lines_can_be_saved_and_undone(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={}).json()
+    lines = [[[1, 5], [10, 6], [20, 5]]]
+
+    updated = client.put(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/occlusion-lines",
+        json={"lines": lines},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["occlusion_lines"] == lines
+    undone = client.post(f"/api/maps/{map_state.id}/undo")
+    assert undone.status_code == 200
+    layer = next(item for item in client.get(f"/api/maps/{map_state.id}/layers").json()
+                 if item["id"] == created["id"])
+    assert layer["occlusion_lines"] == []
+
+
+def test_auto_baselines_fill_only_layers_without_existing_lines(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    repository = DiskMaskRepository(app_services.project, map_state.id)
+    first = np.zeros((map_state.height, map_state.width), dtype=np.uint8)
+    first[2:7, 2:9] = 255
+    second = np.zeros_like(first)
+    second[4:10, 12:20] = 255
+    map_state.layers += [
+        LayerState.mask_layer("first", "first", "object", repository.save("first", first)),
+        LayerState.mask_layer("second", "second", "object", repository.save("second", second)),
+    ]
+    map_state.layer("second").occlusion_lines = [[[12, 9], [19, 9]]]
+
+    response = client.post(f"/api/maps/{map_state.id}/occlusion-lines/auto")
+
+    assert response.status_code == 200
+    assert response.json()["created"] == 1
+    assert map_state.layer("first").occlusion_lines
+    assert map_state.layer("second").occlusion_lines == [[[12, 9], [19, 9]]]
+
+
+@pytest.mark.parametrize("regions", [
+    [[[1, 1], [2, 2]]],
+    [[[1, 1], [1, 1], [1, 1]]],
+    [[[1, 1], [2, 2], [3, 3]]],
+    [[[-1, 1], [2, 2], [3, 3]]],
+    [[[1, 1], [25, 2], [3, 3]]],
+    "not-a-list",
+])
+def test_occlusion_regions_reject_invalid_geometry(tmp_path, regions):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={}).json()
+
+    response = client.put(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/occlusion-regions",
+        json={"regions": regions},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "遮挡区域格式不正确"
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity"])
+def test_occlusion_regions_reject_non_finite_numbers(tmp_path, number):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={}).json()
+
+    response = client.put(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/occlusion-regions",
+        content=f'{{"regions":[[[1,1],[2,2],[{number},3]]]}}',
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "遮挡区域格式不正确"
+
+
+def test_original_layer_cannot_have_occlusion_regions(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+
+    response = client.put(
+        f"/api/maps/{map_state.id}/layers/original/occlusion-regions",
+        json={"regions": [[[1, 1], [10, 1], [10, 10]]]},
+    )
+
+    assert response.status_code == 400
+    assert "蒙版" in response.json()["detail"]
+
+
+def test_export_api_can_include_occlusion_manifest(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={}).json()
+    client.put(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/occlusion-lines",
+        json={"lines": [[[1, 12], [20, 12]]]},
+    )
+    output = tmp_path / "遮挡导出"
+
+    response = client.post("/api/export", json={
+        "output_dir": str(output),
+        "scope": "all",
+        "map_ids": [map_state.id],
+        "include_occlusion": True,
+    })
+
+    assert response.status_code == 200
+    manifests = response.json()["occlusion_manifests"]
+    assert len(manifests) == 1
+    assert Path(manifests[0]).is_file()
 
 
 def test_deleting_a_map_keeps_the_source_file(tmp_path):
@@ -264,7 +558,7 @@ def test_box_segment_keeps_existing_masks_and_only_the_new_part(tmp_path):
     assert int(saved[:, 8:].min()) == 255
 
 
-def test_box_on_an_edited_layer_adds_the_recognition_without_covering_other_masks(tmp_path):
+def test_box_on_an_edited_layer_unions_the_whole_recognition_even_over_other_masks(tmp_path):
     app_services = services(tmp_path)
     map_state = app_services.project.state.maps[0]
 
@@ -294,8 +588,7 @@ def test_box_on_an_edited_layer_adds_the_recognition_without_covering_other_mask
     assert job["result"]["added"] is True
     saved = np.asarray(Image.open(edit_path).convert("L"))
     assert saved[0, 21] == 255
-    assert int(saved[:, :8].max()) == 0
-    assert int(saved[:, 8:].min()) == 255
+    assert int(saved.min()) == 255
     untouched = np.asarray(Image.open(old_path).convert("L"))
     assert int(untouched[:, :8].min()) == 255
     assert client.get(f"/api/maps/{map_state.id}/layers").json() == before
@@ -335,3 +628,44 @@ def test_project_save_and_layer_patch(tmp_path):
     assert response.json()["visible"] is False
     assert client.post("/api/projects/save").json()["saved"] is True
     assert app_services.project.manifest_path.exists()
+
+
+def test_saved_project_is_restored_when_the_app_starts_again(tmp_path, monkeypatch):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    expected_map_id = app_services.project.state.maps[0].id
+    assert client.post("/api/projects/save").status_code == 200
+    monkeypatch.setattr(web_app.InferenceService, "default", lambda config: FakeInference())
+
+    restarted = TestClient(create_app(AppConfig(project_root=tmp_path)))
+
+    assert [item["id"] for item in restarted.get("/api/maps").json()] == [expected_map_id]
+
+
+def test_opened_project_becomes_the_next_startup_project(tmp_path, monkeypatch):
+    first_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), first_services))
+    opened = ProjectStore.create(tmp_path / "另一个项目", "另一个项目")
+    image_path = tmp_path / "另一个地图.png"
+    Image.new("RGB", (12, 10), "blue").save(image_path)
+    expected_map_id = opened.import_image(image_path).id
+    opened.save()
+
+    response = client.post("/api/projects/open", json={"path": str(opened.root)})
+    monkeypatch.setattr(web_app.InferenceService, "default", lambda config: FakeInference())
+    restarted = TestClient(create_app(AppConfig(project_root=tmp_path)))
+
+    assert response.status_code == 200
+    assert [item["id"] for item in restarted.get("/api/maps").json()] == [expected_map_id]
+
+
+def test_invalid_last_project_record_falls_back_to_a_blank_project(tmp_path, monkeypatch):
+    (tmp_path / ".map-cutout-last-project.json").write_text(
+        '{"project_path": "Z:/已经不存在/项目"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web_app.InferenceService, "default", lambda config: FakeInference())
+
+    restarted = TestClient(create_app(AppConfig(project_root=tmp_path)))
+
+    assert restarted.get("/api/maps").json() == []

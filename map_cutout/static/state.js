@@ -14,6 +14,7 @@ export class ApiClient {
   get(path) { return this.request(path); }
   post(path, data = {}) { return this.request(path, { method: "POST", body: JSON.stringify(data) }); }
   patch(path, data) { return this.request(path, { method: "PATCH", body: JSON.stringify(data) }); }
+  put(path, data) { return this.request(path, { method: "PUT", body: JSON.stringify(data) }); }
   delete(path) { return this.request(path, { method: "DELETE" }); }
 }
 
@@ -25,6 +26,8 @@ export class AppState extends EventTarget {
     this.currentMapId = null;
     this.layers = [];
     this.folders = [];
+    this.walkableLayers = [];
+    this.walkableFolders = [];
     this.selectedLayerIds = new Set();
     this.dirty = false;
     this.busy = false;
@@ -50,8 +53,11 @@ export class AppState extends EventTarget {
   }
 
   async loadLayers() {
-    if (!this.currentMapId) { this.layers = []; this.emit(); return; }
+    if (!this.currentMapId) { this.layers = []; this.walkableLayers = []; this.walkableFolders = []; this.emit(); return; }
     this.layers = await this.api.get(`/api/maps/${this.currentMapId}/layers`);
+    const walkable = await this.api.get(`/api/maps/${this.currentMapId}/walkable/layers`);
+    this.walkableLayers = walkable.layers || [];
+    this.walkableFolders = walkable.folders || [];
     const current = this.maps.find(item => item.id === this.currentMapId);
     this.folders = current?.folders || [];
     this.emit();

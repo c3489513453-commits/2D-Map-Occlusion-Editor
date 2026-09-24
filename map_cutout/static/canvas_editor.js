@@ -1,3 +1,5 @@
+import {footprintIsBehindLine, nearestLineIndex, nearestLineNode} from "/static/occlusion_preview.js?v=footprint-occlusion2";
+
 export function screenToImage(x, y, view) {
   return {x: (x - view.offsetX) / view.scale, y: (y - view.offsetY) / view.scale};
 }
@@ -48,6 +50,15 @@ export function lassoCommitPoints(points, closingPoint, scale, threshold = 14) {
   return points.map(point => [point.x, point.y]);
 }
 
+export function footprintIsWalkable(contains, position, footpoint, scale = 1) {
+  if (!contains || !position || !footpoint) return true;
+  const left = Number.isFinite(footpoint.left) ? footpoint.left : footpoint.x;
+  const right = Number.isFinite(footpoint.right) ? footpoint.right : footpoint.x;
+  const offsets = [left, (left + right) / 2, right]
+    .map(value => (value - footpoint.x) * scale);
+  return offsets.every(offset => contains(position.x + offset, position.y));
+}
+
 const LASSO_TOOLS = ["lasso-add", "lasso-subtract"];
 const EDIT_TOOLS = ["brush", "eraser", ...LASSO_TOOLS];
 
@@ -76,8 +87,22 @@ export class CanvasEditor extends EventTarget {
     this.maskGeneration = 0;
     this.maskEditLayerId = null;
     this.loadedMapId = null;
+    this.character = null;
+    this.characterDeleteMode = false;
+    this.characterScale = 1;
+    this.previewMode = false;
+    this.occlusionLayerId = null;
+    this.occlusionDraft = null;
+    this.selectedOcclusionLine = null;
+    this.hiddenOcclusionInfo = new Set();
+    this.foregroundOverlays = new Map();
+    this.walkableLayerIds = new Set();
     image.addEventListener("load", () => {
       this.maskOverlays.clear();
+      this.foregroundOverlays.clear();
+      if (this.character) {
+        this.character.position = {x: image.naturalWidth / 2, y: image.naturalHeight / 2};
+      }
       if (this.previewImage) this.previewOverlay = this.createTintedMask(this.previewImage, [240, 184, 91], .55);
       this.resize();
     });
@@ -98,6 +123,7 @@ export class CanvasEditor extends EventTarget {
 
   setLayers(layers) {
     this.layers = layers;
+    this.foregroundOverlays.clear();
     this.loadMasks();
   }
 
@@ -105,9 +131,168 @@ export class CanvasEditor extends EventTarget {
 
   setMaskEdit(layerId) { this.maskEditLayerId = layerId || null; }
 
+  setWalkableLayers(layerIds) { this.walkableLayerIds = new Set(layerIds || []); }
+
+  setCharacter(image, footpoint) {
+    this.character = {
+      image,
+      footpoint,
+      position: {
+        x: this.image.naturalWidth / 2,
+        y: this.image.naturalHeight / 2,
+      },
+    };
+    this.render();
+  }
+
+  clearCharacter() {
+    this.character = null;
+    this.characterDeleteMode = false;
+    if (this.drag?.type === "character") this.drag = null;
+    this.render();
+  }
+
+  setCharacterScale(scale) {
+    this.characterScale = Math.max(.1, Math.min(5, Number(scale) || 1));
+    this.render();
+  }
+
+  setCharacterDeleteMode(enabled) {
+    this.characterDeleteMode = Boolean(enabled && this.character);
+    this.render();
+  }
+
+  setPreviewMode(enabled) {
+    this.previewMode = Boolean(enabled);
+    this.occlusionDraft = null;
+    if (this.previewMode) {
+      this.lasso = null;
+      this.points = [];
+      this.drag = null;
+    }
+    this.render();
+  }
+
+  setOcclusionEditing(layerId) {
+    this.occlusionLayerId = layerId || null;
+    this.occlusionDraft = null;
+    this.selectedOcclusionLine = null;
+    this.drag = null;
+    if (layerId) this.setTool("select");
+    else this.render();
+  }
+
+  setOcclusionDrawing(layerId) { this.setOcclusionEditing(layerId); }
+
+  setOcclusionInfoHidden(ids) {
+    this.hiddenOcclusionInfo = new Set(ids || []);
+    this.render();
+  }
+
+  cancelOcclusion() {
+    this.occlusionDraft = null;
+    this.selectedOcclusionLine = null;
+    this.render();
+  }
+
+  commitOcclusionLine() {
+    if (!this.occlusionLayerId || !this.occlusionDraft || this.occlusionDraft.length < 2) return false;
+    const layer = this.layers.find(item => item.id === this.occlusionLayerId);
+    const line = this.occlusionDraft.map(item => [Math.round(item.x), Math.round(item.y)]);
+    const lines = [...(layer?.occlusion_lines || []), line];
+    if (layer) layer.occlusion_lines = lines;
+    this.occlusionDraft = null;
+    this.dispatchEvent(new CustomEvent("occlusion-lines", {
+      detail: {layerId: this.occlusionLayerId, lines},
+    }));
+    return true;
+  }
+
+  deleteSelectedOcclusionLine() {
+    if (!this.selectedOcclusionLine) return false;
+    const {layerId, index} = this.selectedOcclusionLine;
+    const layer = this.layers.find(item => item.id === layerId);
+    if (!layer) return false;
+    const lines = (layer.occlusion_lines || []).filter((_, lineIndex) => lineIndex !== index);
+    layer.occlusion_lines = lines;
+    this.selectedOcclusionLine = null;
+    this.dispatchEvent(new CustomEvent("occlusion-lines", {detail: {layerId, lines}}));
+    return true;
+  }
+
+  occlusionLinesFor(layer) {
+    if (this.drag?.type === "occlusion-node" && this.drag.layerId === layer.id) return this.drag.lines;
+    return layer.occlusion_lines || [];
+  }
+
+  startOcclusionInteraction(point) {
+    if (!this.occlusionLayerId || this.occlusionDraft) return false;
+    const layer = this.layers.find(item => item.id === this.occlusionLayerId);
+    if (!layer) return false;
+    const lines = (layer.occlusion_lines || []).map(line => line.map(node => [...node]));
+    const threshold = 8 / this.displayedScale();
+    const node = nearestLineNode(point, lines, threshold);
+    if (node) {
+      this.selectedOcclusionLine = {layerId: layer.id, index: node.lineIndex};
+      this.drag = {
+        type: "occlusion-node",
+        layerId: layer.id,
+        lineIndex: node.lineIndex,
+        nodeIndex: node.nodeIndex,
+        lines,
+      };
+      this.render();
+      return true;
+    }
+    const index = nearestLineIndex(point, lines, threshold);
+    if (index >= 0) {
+      this.selectedOcclusionLine = {layerId: layer.id, index};
+      this.render();
+      return true;
+    }
+    return false;
+  }
+
+  updateOcclusionNode(point) {
+    if (this.drag?.type !== "occlusion-node") return false;
+    const node = this.drag.lines[this.drag.lineIndex][this.drag.nodeIndex];
+    node[0] = Math.max(0, Math.min(this.image.naturalWidth, point.x));
+    node[1] = Math.max(0, Math.min(this.image.naturalHeight, point.y));
+    this.render();
+    return true;
+  }
+
+  finishOcclusionNodeDrag() {
+    if (this.drag?.type !== "occlusion-node") return false;
+    const {layerId, lines} = this.drag;
+    this.drag = null;
+    const rounded = lines.map(line => line.map(point => point.map(value => Math.round(value))));
+    const layer = this.layers.find(item => item.id === layerId);
+    if (layer) layer.occlusion_lines = rounded;
+    this.dispatchEvent(new CustomEvent("occlusion-lines", {detail: {layerId, lines: rounded}}));
+    this.render();
+    return true;
+  }
+
+  finishOcclusionWithRightClick(event) {
+    if (this.tool !== "occlusion" || !this.occlusionLayerId) return false;
+    event?.preventDefault?.();
+    return this.commitOcclusionLine();
+  }
+
+  activeOcclusionLayerIds() {
+    if (!this.character) return [];
+    const foot = this.character.position;
+    return this.layers.filter(layer => layer.visible !== false && layer.mask_path
+      && (layer.occlusion_lines || []).some(line => footprintIsBehindLine(
+        foot, this.character.footpoint, this.characterScale, line)))
+      .map(layer => layer.id);
+  }
+
   invalidateMask(id) {
     this.maskImages.delete(id);
     this.maskOverlays.delete(id);
+    this.foregroundOverlays.delete(id);
     this.maskCanvases.delete(id);
     this.maskLoadToken.set(id, (this.maskLoadToken.get(id) || 0) + 1);
     this.maskVersions.set(id, (this.maskVersions.get(id) || 0) + 1);
@@ -119,6 +304,7 @@ export class CanvasEditor extends EventTarget {
     this.maskCanvases.clear();
     this.maskImages.clear();
     this.maskOverlays.clear();
+    this.foregroundOverlays.clear();
     this.maskLoading.clear();
     this.maskLoadToken.clear();
   }
@@ -129,6 +315,7 @@ export class CanvasEditor extends EventTarget {
     this.maskCanvases.delete(layerId);
     this.maskImages.delete(layerId);
     this.maskOverlays.delete(layerId);
+    this.foregroundOverlays.delete(layerId);
     this.maskLoading.delete(layerId);
     this.maskLoadToken.set(layerId, (this.maskLoadToken.get(layerId) || 0) + 1);
     this.maskVersions.set(layerId, (this.maskVersions.get(layerId) || 0) + 1);
@@ -239,7 +426,7 @@ export class CanvasEditor extends EventTarget {
     return true;
   }
 
-  async setPreview(url) {
+  async setPreview(url, color = [240, 184, 91]) {
     if (!url) {
       this.previewImage = null;
       this.previewOverlay = null;
@@ -252,7 +439,7 @@ export class CanvasEditor extends EventTarget {
       image.onerror = () => resolve(null);
       image.src = url;
     });
-    this.previewOverlay = this.previewImage ? this.createTintedMask(this.previewImage, [240, 184, 91], .55) : null;
+    this.previewOverlay = this.previewImage ? this.createTintedMask(this.previewImage, color, .55) : null;
     this.render();
   }
 
@@ -320,12 +507,27 @@ export class CanvasEditor extends EventTarget {
         y: event.clientY - r.top,
       });
     }, {passive: false});
-    window.addEventListener("keydown", event => { if (event.code === "Space") this.space = true; });
+    window.addEventListener("keydown", event => {
+      if (event.code === "Space") this.space = true;
+      if (event.key === "Escape" && this.occlusionDraft) this.cancelOcclusion();
+      if ((event.key === "Delete" || event.key === "Backspace") && this.deleteSelectedOcclusionLine()) {
+        event.preventDefault();
+      }
+      if (event.key === "Enter" && this.tool === "occlusion" && this.commitOcclusionLine()) {
+        event.preventDefault();
+      }
+    });
     window.addEventListener("keyup", event => { if (event.code === "Space") this.space = false; });
     this.canvas.addEventListener("pointerdown", event => this.pointerDown(event));
     this.canvas.addEventListener("pointermove", event => this.pointerMove(event));
     this.canvas.addEventListener("pointerup", event => this.pointerUp(event));
+    this.canvas.addEventListener("contextmenu", event => this.finishOcclusionWithRightClick(event));
     this.canvas.addEventListener("dblclick", event => {
+      if (this.tool === "occlusion" && this.occlusionDraft?.length >= 2) {
+        event.preventDefault();
+        this.commitOcclusionLine();
+        return;
+      }
       if (!LASSO_TOOLS.includes(this.tool) || !this.lasso || this.lasso.points.length < 3) return;
       event.preventDefault();
       this.closeLasso();
@@ -345,14 +547,41 @@ export class CanvasEditor extends EventTarget {
       this.canvas.setPointerCapture(event.pointerId);
       return;
     }
+    if (event.button !== undefined && event.button !== 0) return;
+    const point = this.local(event);
+    if (this.characterDeleteMode && this.characterDeleteHit(point)) {
+      this.dispatchEvent(new CustomEvent("character-delete"));
+      return;
+    }
+    if (this.occlusionLayerId && !this.previewMode && !this.occlusionDraft
+        && this.startOcclusionInteraction(point)) {
+      if (this.drag?.type === "occlusion-node") this.canvas.setPointerCapture(event.pointerId);
+      return;
+    }
     if (this.tool === "select") {
-      const point = this.local(event);
+      if (this.characterContains(point)) {
+        this.drag = {
+          type: "character",
+          offsetX: point.x - this.character.position.x,
+          offsetY: point.y - this.character.position.y,
+        };
+        this.canvas.setPointerCapture(event.pointerId);
+        return;
+      }
       this.dispatchEvent(new CustomEvent("pick", {
         detail: {
           id: this.pickMask(point.x, point.y),
           additive: event.shiftKey || event.ctrlKey || event.metaKey,
         },
       }));
+      return;
+    }
+    if (this.tool === "occlusion") {
+      if (!this.occlusionLayerId || this.previewMode) return;
+      this.selectedOcclusionLine = null;
+      if (!this.occlusionDraft) this.occlusionDraft = [];
+      this.occlusionDraft.push(point);
+      this.render();
       return;
     }
     if (EDIT_TOOLS.includes(this.tool) && !this.maskEditLayerId) {
@@ -408,6 +637,16 @@ export class CanvasEditor extends EventTarget {
       this.drag.current = this.local(event);
     } else if (this.drag.type === "stroke") {
       this.drag.points.push(this.local(event));
+    } else if (this.drag.type === "character") {
+      const point = this.local(event);
+      const candidate = {
+        x: Math.max(0, Math.min(this.image.naturalWidth, point.x - this.drag.offsetX)),
+        y: Math.max(0, Math.min(this.image.naturalHeight, point.y - this.drag.offsetY)),
+      };
+      if (this.characterCanStand(candidate)) this.character.position = candidate;
+    } else if (this.drag.type === "occlusion-node") {
+      this.updateOcclusionNode(this.local(event));
+      return;
     }
     this.render();
   }
@@ -421,6 +660,10 @@ export class CanvasEditor extends EventTarget {
       return;
     }
     if (!this.drag) return;
+    if (this.drag.type === "occlusion-node") {
+      this.finishOcclusionNodeDrag();
+      return;
+    }
     if (this.drag.type === "box") {
       const a = this.drag.start;
       const b = this.drag.current;
@@ -444,10 +687,51 @@ export class CanvasEditor extends EventTarget {
     this.render();
   }
 
+  characterCanStand(position) {
+    if (!this.walkableLayerIds.size || !this.character) return true;
+    const masks = [...this.walkableLayerIds].map(id => this.maskImages.get(id)).filter(Boolean);
+    if (!masks.length) return false;
+    return footprintIsWalkable(
+      (x, y) => masks.some(mask => this.maskContains(mask, x, y)), position,
+      this.character.footpoint, this.characterScale,
+    );
+  }
+
+  characterBounds() {
+    if (!this.character) return null;
+    const image = this.character.image;
+    const scale = this.characterScale;
+    return {
+      x: this.character.position.x - this.character.footpoint.x * scale,
+      y: this.character.position.y - this.character.footpoint.y * scale,
+      width: (image.naturalWidth || image.width) * scale,
+      height: (image.naturalHeight || image.height) * scale,
+    };
+  }
+
+  characterDeleteControl() {
+    const bounds = this.characterBounds();
+    if (!bounds || !this.characterDeleteMode) return null;
+    return {x: bounds.x + bounds.width, y: bounds.y};
+  }
+
+  characterDeleteHit(point) {
+    const control = this.characterDeleteControl();
+    if (!control || !point) return false;
+    const radius = 13 / Math.max(this.displayedScale(), .1);
+    return Math.hypot(point.x - control.x, point.y - control.y) <= radius;
+  }
+
+  characterContains(point) {
+    const bounds = this.characterBounds();
+    return Boolean(bounds && point.x >= bounds.x && point.x <= bounds.x + bounds.width
+      && point.y >= bounds.y && point.y <= bounds.y + bounds.height);
+  }
+
   async loadMasks() {
     const generation = this.maskGeneration;
     const mapId = this.loadedMapId;
-    const visible = this.layers.filter(layer => layer.visible && layer.mask_path && layer.map_id === mapId);
+    const visible = this.layers.filter(layer => layer.mask_path && layer.map_id === mapId);
     await Promise.all(visible.map(layer => this.loadOneMask(layer)));
     if (generation !== this.maskGeneration || mapId !== this.loadedMapId) return;
     this.maskOverlays.clear();
@@ -483,7 +767,8 @@ export class CanvasEditor extends EventTarget {
         resolve();
       };
       img.onerror = resolve;
-      img.src = `/api/maps/${layer.map_id}/layers/${layer.id}/mask?v=${version}-${generation}-${token}`;
+      const maskUrl = layer.mask_url || `/api/maps/${layer.map_id}/layers/${layer.id}/mask`;
+      img.src = `${maskUrl}?v=${version}-${generation}-${token}`;
     })).finally(() => {
       if (this.maskLoading.get(layer.id) === promise) this.maskLoading.delete(layer.id);
     });
@@ -517,27 +802,85 @@ export class CanvasEditor extends EventTarget {
     return canvas;
   }
 
+  createForegroundOverlay(mask) {
+    const w = this.image.naturalWidth;
+    const h = this.image.naturalHeight;
+    if (!w || !h) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const context = canvas.getContext("2d");
+    context.drawImage(this.image, 0, 0, w, h);
+    context.globalCompositeOperation = "destination-in";
+    const alphaMask = this.createTintedMask(mask, [255, 255, 255], 1);
+    if (alphaMask) context.drawImage(alphaMask, 0, 0, w, h);
+    context.globalCompositeOperation = "source-over";
+    return canvas;
+  }
+
   render() {
     if (!this.image.naturalWidth) return;
     const c = this.context;
     const w = this.image.naturalWidth;
     const h = this.image.naturalHeight;
     c.clearRect(0, 0, w, h);
-    for (const layer of this.layers) {
+    if (!this.previewMode && this.previewOverlay) c.drawImage(this.previewOverlay, 0, 0);
+    if (this.character) {
+      const bounds = this.characterBounds();
+      c.drawImage(this.character.image, bounds.x, bounds.y, bounds.width, bounds.height);
+      for (const id of this.activeOcclusionLayerIds()) {
+        const mask = this.maskImages.get(id);
+        if (!mask) continue;
+        let foreground = this.foregroundOverlays.get(id);
+        if (!foreground) {
+          foreground = this.createForegroundOverlay(mask);
+          if (foreground) this.foregroundOverlays.set(id, foreground);
+        }
+        if (foreground) c.drawImage(foreground, 0, 0);
+      }
+      if (this.characterDeleteMode && !this.previewMode) {
+        c.save();
+        c.strokeStyle = "#fff176";
+        c.lineWidth = 2 / this.view.scale;
+        c.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
+        c.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+        const control = this.characterDeleteControl();
+        const radius = 11 / this.view.scale;
+        c.setLineDash([]);
+        c.beginPath();
+        c.arc(control.x, control.y, radius, 0, Math.PI * 2);
+        c.fillStyle = "#d94b5b";
+        c.fill();
+        c.strokeStyle = "#fff";
+        c.lineWidth = 1.5 / this.view.scale;
+        c.stroke();
+        c.beginPath();
+        const arm = 4 / this.view.scale;
+        c.moveTo(control.x - arm, control.y - arm);
+        c.lineTo(control.x + arm, control.y + arm);
+        c.moveTo(control.x + arm, control.y - arm);
+        c.lineTo(control.x - arm, control.y + arm);
+        c.stroke();
+        c.restore();
+      }
+    }
+    if (!this.previewMode) for (const layer of this.layers) {
       const mask = this.maskImages.get(layer.id);
       if (mask && layer.visible) {
         let overlay = this.maskOverlays.get(layer.id);
         if (!overlay) {
-          overlay = this.createTintedMask(mask, [63, 210, 230], .42);
+          const walkable = layer.kind === "walkable";
+          overlay = this.createTintedMask(mask, walkable ? [64, 220, 130] : [63, 210, 230], walkable ? .34 : .42);
           if (overlay) this.maskOverlays.set(layer.id, overlay);
         }
         if (overlay) c.drawImage(overlay, 0, 0);
       }
     }
-    if (this.previewOverlay) c.drawImage(this.previewOverlay, 0, 0);
+    if (!this.previewMode) this.drawOcclusionLines(c);
     c.lineWidth = 2 / this.view.scale;
-    c.strokeStyle = "#63d5e6";
-    c.fillStyle = "#63d5e622";
+    const editingWalkable = this.walkableLayerIds.has(this.maskEditLayerId);
+    c.strokeStyle = editingWalkable ? "#40dc82" : "#63d5e6";
+    c.fillStyle = editingWalkable ? "#40dc8222" : "#63d5e622";
     if (this.drag?.type === "box") {
       const a = this.drag.start;
       const b = this.drag.current;
@@ -563,17 +906,50 @@ export class CanvasEditor extends EventTarget {
       c.lineWidth = this.brushRadius * 2;
       c.lineCap = "round";
       c.lineJoin = "round";
-      c.strokeStyle = this.tool === "brush" ? "#63d5e699" : "#ff7a8a99";
+      const walkable = this.walkableLayerIds.has(this.maskEditLayerId);
+      c.strokeStyle = this.tool === "brush" ? (walkable ? "#40dc8299" : "#63d5e699") : "#ff7a8a99";
       c.stroke();
     } else if (this.lasso?.points.length) {
       this.drawOpenLasso(c);
     }
   }
 
+  drawOcclusionLines(c) {
+    for (const layer of this.layers) {
+      if (this.hiddenOcclusionInfo.has(layer.id)) continue;
+      const lines = this.occlusionLinesFor(layer);
+      for (let index = 0; index < lines.length; index += 1) {
+        const selected = this.selectedOcclusionLine?.layerId === layer.id
+          && this.selectedOcclusionLine?.index === index;
+        this.drawOcclusionLine(c, lines[index], selected);
+      }
+    }
+    if (this.occlusionDraft?.length) {
+      this.drawOcclusionLine(c, this.occlusionDraft.map(point => [point.x, point.y]), false);
+    }
+  }
+
+  drawOcclusionLine(c, region, selected) {
+    if (!region.length) return;
+    c.beginPath();
+    c.moveTo(region[0][0], region[0][1]);
+    for (let index = 1; index < region.length; index += 1) c.lineTo(region[index][0], region[index][1]);
+    c.lineWidth = (selected ? 4 : 2) / this.view.scale;
+    c.strokeStyle = selected ? "#fff176" : "#ff9f43";
+    c.stroke();
+    for (const point of region) {
+      c.beginPath();
+      c.arc(point[0], point[1], 4 / this.view.scale, 0, Math.PI * 2);
+      c.fillStyle = "#ffd166";
+      c.fill();
+    }
+  }
+
   drawOpenLasso(c) {
     const pts = this.lasso.points;
     const adding = this.lasso.tool === "lasso-add";
-    const color = adding ? "#63d5e6" : "#ff7a8a";
+    const walkable = this.walkableLayerIds.has(this.maskEditLayerId);
+    const color = adding ? (walkable ? "#40dc82" : "#63d5e6") : "#ff7a8a";
     const scale = this.displayedScale();
     const near = Boolean(this.lasso.cursor && canCloseLasso(pts, this.lasso.cursor, scale));
     c.beginPath();
@@ -584,7 +960,7 @@ export class CanvasEditor extends EventTarget {
     c.lineWidth = 2 / this.view.scale;
     c.strokeStyle = color;
     if (near) {
-      c.fillStyle = adding ? "#63d5e655" : "#ff7a8a55";
+      c.fillStyle = adding ? (walkable ? "#40dc8255" : "#63d5e655") : "#ff7a8a55";
       c.fill();
     }
     c.stroke();

@@ -67,6 +67,29 @@ class SetLayerLockCommand(_SetLayerAttributeCommand):
     attribute = "locked"
 
 
+class SetOcclusionRegionsCommand(_SetLayerAttributeCommand):
+    attribute = "occlusion_regions"
+
+
+class SetOcclusionLinesCommand(_SetLayerAttributeCommand):
+    attribute = "occlusion_lines"
+
+
+class SetManyOcclusionLinesCommand:
+    def __init__(self, changes):
+        self.changes = changes
+        self.previous = [(layer, layer.occlusion_lines) for layer, _ in changes]
+
+    def execute(self):
+        for layer, lines in self.changes:
+            layer.occlusion_lines = lines
+        return [layer for layer, _ in self.changes]
+
+    def undo(self):
+        for layer, lines in self.previous:
+            layer.occlusion_lines = lines
+
+
 class AssignLayerFolderCommand(_SetLayerAttributeCommand):
     attribute = "folder_id"
 

@@ -11,6 +11,7 @@ from .domain import FolderState, LayerState, MapState, ProjectState
 
 
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+LAST_PROJECT_RECORD = ".map-cutout-last-project.json"
 
 
 class ProjectSaveError(RuntimeError):
@@ -26,7 +27,22 @@ class SourceSizeMismatch(ValueError):
 
 
 def _layer_from_dict(data: dict) -> LayerState:
-    return LayerState(**data)
+    lines = data.get("occlusion_lines", [])
+    if not lines and data.get("occlusion_regions"):
+        lines = []
+        for region in data["occlusion_regions"]:
+            if len(region) < 2:
+                continue
+            left = min(point[0] for point in region)
+            right = max(point[0] for point in region)
+            bottom = max(point[1] for point in region)
+            if left < right:
+                lines.append([[left, bottom], [right, bottom]])
+    return LayerState(**{
+        **data,
+        "occlusion_regions": data.get("occlusion_regions", []),
+        "occlusion_lines": lines,
+    })
 
 
 def _map_from_dict(data: dict) -> MapState:
@@ -35,8 +51,11 @@ def _map_from_dict(data: dict) -> MapState:
         source_path=data["source_path"],
         width=data["width"],
         height=data["height"],
+        walkable_mask_path=data.get("walkable_mask_path"),
         layers=[_layer_from_dict(item) for item in data.get("layers", [])],
         folders=[FolderState(**item) for item in data.get("folders", [])],
+        walkable_layers=[_layer_from_dict(item) for item in data.get("walkable_layers", [])],
+        walkable_folders=[FolderState(**item) for item in data.get("walkable_folders", [])],
         prompt=data.get("prompt", ""),
         threshold=data.get("threshold", 0.4),
     )
@@ -69,8 +88,17 @@ class ProjectStore:
             maps=[_map_from_dict(item) for item in data.get("maps", [])],
             current_map_id=data.get("current_map_id"),
             version=data.get("version", 1),
+            character_path=data.get("character_path"),
+            character_scale=float(data.get("character_scale", 1.0)),
         )
-        return cls(root, state)
+        store = cls(root, state)
+        for map_state in store.state.maps:
+            if map_state.walkable_mask_path and not map_state.walkable_layers:
+                map_state.walkable_layers.append(LayerState(
+                    "walkable-legacy", "行走区域", "walkable",
+                    mask_path=map_state.walkable_mask_path,
+                ))
+        return store
 
     def import_folder(self, folder: Path) -> list[MapState]:
         paths = sorted(
@@ -133,3 +161,28 @@ class ProjectStore:
         state.source_path = str(new_path)
         self.dirty = True
         return state
+
+
+def remember_project(project_root: Path, project: ProjectStore) -> None:
+    project_root = Path(project_root).resolve()
+    project_root.mkdir(parents=True, exist_ok=True)
+    record = project_root / LAST_PROJECT_RECORD
+    temporary = project_root / f"{LAST_PROJECT_RECORD}.tmp"
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump({"project_path": str(project.root)}, stream, ensure_ascii=False, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(record)
+
+
+def load_startup_project(project_root: Path) -> ProjectStore:
+    project_root = Path(project_root).resolve()
+    record = project_root / LAST_PROJECT_RECORD
+    try:
+        data = json.loads(record.read_text(encoding="utf-8"))
+        remembered_root = Path(data["project_path"])
+        if not (remembered_root / "project.json").is_file():
+            raise FileNotFoundError(remembered_root / "project.json")
+        return ProjectStore.load(remembered_root)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return ProjectStore.create(project_root / "未命名项目", "未命名项目")

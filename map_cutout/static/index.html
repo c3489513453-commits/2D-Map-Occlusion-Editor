@@ -14,6 +14,7 @@
     <nav class="toolbar" aria-label="项目工具">
       <button id="new-project">新建项目</button><button id="open-project">打开项目</button>
       <button id="import-image">导入图片</button><button id="import-folder">导入文件夹</button>
+      <input id="character-file" type="file" accept="image/png" hidden><button id="import-character">导入小人</button><button id="delete-character" title="显示小人右上角的删除按钮">删除小人</button><label class="character-scale" title="小人显示大小">大小 <input id="character-scale" type="range" min="10" max="300" value="100"></label><button id="auto-baselines">自动底线</button><button id="preview-mode">预览</button>
       <span class="divider"></span><button id="undo" title="Ctrl+Z">撤销</button><button id="redo">重做</button>
       <button id="save" class="primary" title="Ctrl+S">保存</button>
     </nav>
@@ -50,16 +51,16 @@
         <button id="cancel-mask">取消</button>
       </div>
       <div class="bottom-tools" role="toolbar" aria-label="画布工具">
-        <button data-tool="select" class="active">选择</button><button data-tool="box" title="没在编辑图层时，框选用来生成新蒙版；正在编辑时，会识别方框里的物体并加进当前蒙版">框选</button>
+        <button data-tool="select" class="active" title="点击蒙版选择图层，拖动小人测试位置">↖ 选择与移动</button><button data-tool="box" title="没在编辑图层时，框选用来生成新蒙版；正在编辑时，会识别方框里的区域并加进当前图层">框选</button>
         <button data-tool="positive">正点</button><button data-tool="negative">负点</button>
-        <button data-tool="brush">画笔</button><button data-tool="eraser">橡皮</button>
+        <button id="walkable-brush" data-tool="brush" hidden>画笔</button><button data-tool="eraser">橡皮</button><button data-tool="occlusion" title="进入底线编辑后，左键增加节点，右键完成">画底线</button>
         <button data-tool="lasso-add">套索增加</button><button data-tool="lasso-subtract">套索减去</button>
         <span class="spacer"></span><button id="zoom-out">−</button><span id="zoom-label">100%</span><button id="zoom-in">＋</button>
       </div>
     </section>
 
     <aside class="layers-panel panel">
-      <div class="panel-heading"><h2>图层</h2><span class="heading-actions"><button id="add-layer" class="icon-button" title="先新建一个空图层，再用画笔涂">＋ 图层</button><button id="add-folder" class="icon-button" title="新建文件夹">＋ 文件夹</button></span></div>
+      <div class="panel-heading"><div id="layer-mode" class="layer-mode" aria-label="图层类型"><button type="button" data-mode="resources" class="active">资源蒙版</button><button type="button" data-mode="walkable">行走区域</button></div><span id="resource-heading-actions" class="heading-actions"><button id="add-layer" class="icon-button" title="先新建一个空图层，再用画笔涂">＋ 图层</button><button id="add-folder" class="icon-button" title="新建文件夹">＋ 文件夹</button></span></div>
       <div class="layer-actions"><button id="merge">合并选中</button><button id="export-selected">导出</button></div>
       <div id="layer-tree" class="layer-tree"></div>
       <div id="layer-empty" class="empty-state compact"><p>点「＋ 图层」先建空图层，再用画笔涂<br>或识别后显示在这里</p></div>
@@ -72,11 +73,12 @@
     <form method="dialog"><div class="dialog-heading"><h2>导出透明素材</h2><button type="button" data-close aria-label="关闭">×</button></div>
       <label>导出范围<select name="scope"><option value="selected">选中图层</option><option value="visible">当前地图可见图层</option><option value="all">当前地图全部图层</option><option value="project">整个项目</option></select></label>
       <fieldset><legend>图片尺寸</legend><label><input type="radio" name="mode" value="tight" checked> 紧凑裁剪（素材多大就导出多大）</label><label><input type="radio" name="mode" value="full_size"> 保持原图尺寸（其余位置透明）</label></fieldset>
+      <label class="check"><input type="checkbox" name="include_occlusion"> 导出遮挡与行走配置 JSON（遮挡图和行走图保持原图尺寸）</label>
       <label>输出文件夹<input name="output_dir" placeholder="留空则使用项目的 exports 文件夹"></label>
       <label class="check"><input type="checkbox" name="include_hidden" checked> 包含隐藏图层</label><label class="check"><input type="checkbox" name="preserve_folders"> 保留图层文件夹结构</label>
       <div class="export-result" hidden></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" class="primary">开始导出</button></div>
     </form>
   </dialog>
-  <script type="module" src="/static/app.js"></script>
+  <script type="module" src="/static/app.js?v=character-delete4"></script>
 </body>
 </html>
