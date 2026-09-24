@@ -6,8 +6,8 @@ export class InferenceControls{
  async wait(jobId,phases=["加载模型","检测目标","生成蒙版","建立图层"]){let tick=0;for(;;){this.state.setStatus(phases[Math.min(Math.floor(tick++/2),3)],true);const job=await this.api.get(`/api/jobs/${jobId}`);if(job.state==="completed")return job.result;if(job.state==="failed")throw Error(job.message);await new Promise(r=>setTimeout(r,350))}}
  async detect(){if(!this.state.currentMapId)throw Error("请先导入地图");const prompt=this.el.prompt.value.trim();if(!prompt)throw Error("请输入要识别的物体");const {job_id}=await this.api.post(`/api/maps/${this.state.currentMapId}/detect`,{prompt,threshold:Number(this.el.threshold.value)});const created=await this.wait(job_id);this.state.selectedLayerIds=new Set(created.map(layer=>layer.id));if(created.length)this.state.setDirty(true);await this.state.loadLayers();this.state.setStatus(created.length?`识别完成，已建立 ${created.length} 个图层。重叠的地方留给了更早的蒙版`:`没有新图层。这些地方已经有蒙版了`)}
  prepare(data){this.pending=data;this.el.manual.hidden=false;this.el.commit.hidden=true;this.el.generate.hidden=false;this.state.setStatus("提示已标记，请生成蒙版")}
- async generate(){if(!this.pending)throw Error("请先框选或添加提示点");const name=this.el.name.value.trim()||"object";const walkable=this.isWalkableEdit();const {job_id}=await this.api.post(`/api/maps/${this.state.currentMapId}/segment`,{...this.pending,name,target_kind:walkable?"walkable":"resource"});const preview=await this.wait(job_id);if(!preview.preview_id){this.state.setStatus("这块地方已经有蒙版了");return}this.previewId=preview.preview_id;await this.editor.setPreview(preview.mask_url,walkable?[42,210,108]:undefined);this.el.generate.hidden=true;this.el.commit.hidden=false;this.state.setStatus(walkable?"行走区域预览已生成，可确认加入当前行走图层":"蒙版预览已生成。重叠的地方留给了更早的蒙版")}
- async commit(){if(!this.previewId)return;const id=this.state.editingLayerId;const walkable=this.isWalkableEdit();const endpoint=walkable?`/api/maps/${this.state.currentMapId}/walkable/layers/${id}/segment-commit`:`/api/maps/${this.state.currentMapId}/segment/commit`;const layer=await this.api.post(endpoint,{preview_id:this.previewId,name:this.el.name.value.trim()||"object"});this.state.selectedLayerIds=new Set([layer.id]);this.state.setDirty(true);await this.state.loadLayers();if(walkable){this.editor.dropLocalMask(id);await this.editor.loadMasks()}this.clear();this.state.setStatus(walkable?`识别结果已加入「${layer.name}」`:"新图层已建立")}
+ async generate(){if(!this.pending)throw Error("请先框选或添加提示点");const name=this.el.name.value.trim()||"object";const walkable=this.isWalkableEdit();const {job_id}=await this.api.post(`/api/maps/${this.state.currentMapId}/segment`,{...this.pending,name,target_kind:walkable?"walkable":"resource"});const preview=await this.wait(job_id);if(!preview.preview_id){this.state.setStatus("这块地方已经有蒙版了");return}this.previewId=preview.preview_id;await this.editor.setPreview(preview.mask_url,walkable?[168,85,247]:undefined);this.el.generate.hidden=true;this.el.commit.hidden=false;this.state.setStatus(walkable?"行走区域预览已生成，可确认加入当前行走图层":"蒙版预览已生成。重叠的地方留给了更早的蒙版")}
+ async commit(){if(!this.previewId)return;const id=this.state.editingLayerId;const walkable=this.isWalkableEdit();const endpoint=walkable?`/api/maps/${this.state.currentMapId}/walkable/layers/${id}/segment-commit`:`/api/maps/${this.state.currentMapId}/segment/commit`;const layer=await this.api.post(endpoint,{preview_id:this.previewId,name:this.el.name.value.trim()||"object"});this.state.selectedLayerIds=new Set([layer.id]);this.state.setDirty(true);await this.state.loadLayers();if(walkable){this.editor.dropLocalMask(id);await this.editor.loadMasks();this.editor.dispatchEvent(new CustomEvent("walkable-updated"))}this.clear();this.state.setStatus(walkable?`识别结果已加入「${layer.name}」`:"新图层已建立")}
  async cancel(){if(this.previewId)await this.api.delete(`/api/previews/${this.previewId}`);this.clear();this.state.setStatus("已取消手动分割")}
  clear(){this.pending=null;this.previewId=null;this.el.manual.hidden=true;this.editor.setPreview(null);this.editor.points=[];this.editor.render()}
  isWalkableEdit(){const id=this.state.editingLayerId;return Boolean(id&&this.state.walkableLayers?.some(item=>item.id===id))}
@@ -31,6 +31,7 @@ export class InferenceControls{
   this.editor.dropLocalMask(id);
   await this.editor.loadMasks();
   this.state.setDirty(true);
+  if(walkable)this.editor.dispatchEvent(new CustomEvent("walkable-updated"));
   this.state.setStatus(`已把识别到的区域加进「${layer.name}」`);
  }
  async paint(stroke){
@@ -51,6 +52,7 @@ export class InferenceControls{
   try{
     await task;
     if(this.state.currentMapId===mapId)this.state.setDirty(true);
+    if(walkable)this.editor.dispatchEvent(new CustomEvent("walkable-updated"));
     const added=Boolean(stroke.value);
     this.state.setStatus(stroke.shape==="polygon"
       ?(added?`已把这块区域加到「${layer.name}」`:`已从「${layer.name}」减去这块区域`)

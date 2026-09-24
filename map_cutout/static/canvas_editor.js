@@ -92,11 +92,17 @@ export class CanvasEditor extends EventTarget {
     this.characterScale = 1;
     this.previewMode = false;
     this.occlusionLayerId = null;
+    this.lineField = "occlusion_lines";
+    this.lineEvent = "occlusion-lines";
     this.occlusionDraft = null;
     this.selectedOcclusionLine = null;
     this.hiddenOcclusionInfo = new Set();
     this.foregroundOverlays = new Map();
     this.walkableLayerIds = new Set();
+    this.resourceMaskIds = new Set();
+    this.finalWalkableMask = null;
+    this.finalWalkableMapId = null;
+    this.walkableConfigured = false;
     image.addEventListener("load", () => {
       this.maskOverlays.clear();
       this.foregroundOverlays.clear();
@@ -132,6 +138,25 @@ export class CanvasEditor extends EventTarget {
   setMaskEdit(layerId) { this.maskEditLayerId = layerId || null; }
 
   setWalkableLayers(layerIds) { this.walkableLayerIds = new Set(layerIds || []); }
+
+  setResourceMasks(layerIds) { this.resourceMaskIds = new Set(layerIds || []); }
+
+  setWalkableConfigured(configured) { this.walkableConfigured = Boolean(configured); }
+
+  async loadFinalWalkable(mapId) {
+    this.finalWalkableMapId = mapId || null;
+    this.finalWalkableMask = null;
+    if (!mapId) return;
+    const image = new Image();
+    await new Promise(resolve => {
+      image.onload = resolve;
+      image.onerror = resolve;
+      image.src = `/api/maps/${mapId}/walkable/final-mask?v=${Date.now()}`;
+    });
+    if (this.finalWalkableMapId !== mapId || !image.naturalWidth) return;
+    try { this.finalWalkableMask = await createImageBitmap(image); }
+    catch { this.finalWalkableMask = image; }
+  }
 
   setCharacter(image, footpoint) {
     this.character = {
@@ -174,6 +199,19 @@ export class CanvasEditor extends EventTarget {
   }
 
   setOcclusionEditing(layerId) {
+    this.lineField = "occlusion_lines";
+    this.lineEvent = "occlusion-lines";
+    this.occlusionLayerId = layerId || null;
+    this.occlusionDraft = null;
+    this.selectedOcclusionLine = null;
+    this.drag = null;
+    if (layerId) this.setTool("select");
+    else this.render();
+  }
+
+  setWalkableBoundaryEditing(layerId) {
+    this.lineField = "walkable_boundary_lines";
+    this.lineEvent = "walkable-boundary-lines";
     this.occlusionLayerId = layerId || null;
     this.occlusionDraft = null;
     this.selectedOcclusionLine = null;
@@ -199,10 +237,10 @@ export class CanvasEditor extends EventTarget {
     if (!this.occlusionLayerId || !this.occlusionDraft || this.occlusionDraft.length < 2) return false;
     const layer = this.layers.find(item => item.id === this.occlusionLayerId);
     const line = this.occlusionDraft.map(item => [Math.round(item.x), Math.round(item.y)]);
-    const lines = [...(layer?.occlusion_lines || []), line];
-    if (layer) layer.occlusion_lines = lines;
+    const lines = [...(layer?.[this.lineField] || []), line];
+    if (layer) layer[this.lineField] = lines;
     this.occlusionDraft = null;
-    this.dispatchEvent(new CustomEvent("occlusion-lines", {
+    this.dispatchEvent(new CustomEvent(this.lineEvent, {
       detail: {layerId: this.occlusionLayerId, lines},
     }));
     return true;
@@ -213,40 +251,45 @@ export class CanvasEditor extends EventTarget {
     const {layerId, index} = this.selectedOcclusionLine;
     const layer = this.layers.find(item => item.id === layerId);
     if (!layer) return false;
-    const lines = (layer.occlusion_lines || []).filter((_, lineIndex) => lineIndex !== index);
-    layer.occlusion_lines = lines;
+    const field = this.selectedOcclusionLine.field || this.lineField;
+    const lines = (layer[field] || []).filter((_, lineIndex) => lineIndex !== index);
+    layer[field] = lines;
     this.selectedOcclusionLine = null;
-    this.dispatchEvent(new CustomEvent("occlusion-lines", {detail: {layerId, lines}}));
+    const eventName = field === "walkable_boundary_lines" ? "walkable-boundary-lines" : "occlusion-lines";
+    this.dispatchEvent(new CustomEvent(eventName, {detail: {layerId, lines}}));
     return true;
   }
 
   occlusionLinesFor(layer) {
-    if (this.drag?.type === "occlusion-node" && this.drag.layerId === layer.id) return this.drag.lines;
-    return layer.occlusion_lines || [];
+    if (this.drag?.type === "occlusion-node" && this.drag.layerId === layer.id
+        && this.drag.field === this.lineField) return this.drag.lines;
+    return layer[this.lineField] || [];
   }
 
   startOcclusionInteraction(point) {
     if (!this.occlusionLayerId || this.occlusionDraft) return false;
     const layer = this.layers.find(item => item.id === this.occlusionLayerId);
     if (!layer) return false;
-    const lines = (layer.occlusion_lines || []).map(line => line.map(node => [...node]));
+    const lines = (layer[this.lineField] || []).map(line => line.map(node => [...node]));
     const threshold = 8 / this.displayedScale();
     const node = nearestLineNode(point, lines, threshold);
     if (node) {
-      this.selectedOcclusionLine = {layerId: layer.id, index: node.lineIndex};
+      this.selectedOcclusionLine = {layerId: layer.id, index: node.lineIndex, field: this.lineField};
       this.drag = {
         type: "occlusion-node",
         layerId: layer.id,
         lineIndex: node.lineIndex,
         nodeIndex: node.nodeIndex,
         lines,
+        field: this.lineField,
+        eventName: this.lineEvent,
       };
       this.render();
       return true;
     }
     const index = nearestLineIndex(point, lines, threshold);
     if (index >= 0) {
-      this.selectedOcclusionLine = {layerId: layer.id, index};
+      this.selectedOcclusionLine = {layerId: layer.id, index, field: this.lineField};
       this.render();
       return true;
     }
@@ -264,12 +307,12 @@ export class CanvasEditor extends EventTarget {
 
   finishOcclusionNodeDrag() {
     if (this.drag?.type !== "occlusion-node") return false;
-    const {layerId, lines} = this.drag;
+    const {layerId, lines, field, eventName} = this.drag;
     this.drag = null;
     const rounded = lines.map(line => line.map(point => point.map(value => Math.round(value))));
     const layer = this.layers.find(item => item.id === layerId);
-    if (layer) layer.occlusion_lines = rounded;
-    this.dispatchEvent(new CustomEvent("occlusion-lines", {detail: {layerId, lines: rounded}}));
+    if (layer) layer[field] = rounded;
+    this.dispatchEvent(new CustomEvent(eventName, {detail: {layerId, lines: rounded}}));
     this.render();
     return true;
   }
@@ -372,6 +415,15 @@ export class CanvasEditor extends EventTarget {
       }
     }
     context.restore();
+    if (stroke.value && this.walkableLayerIds.has(layerId)) {
+      context.save();
+      context.globalCompositeOperation = "destination-out";
+      for (const resourceId of this.resourceMaskIds) {
+        const resource = this.maskImages.get(resourceId);
+        if (resource) context.drawImage(resource, 0, 0, canvas.width, canvas.height);
+      }
+      context.restore();
+    }
     this.maskImages.set(layerId, canvas);
     this.maskOverlays.delete(layerId);
     this.render();
@@ -688,11 +740,11 @@ export class CanvasEditor extends EventTarget {
   }
 
   characterCanStand(position) {
-    if (!this.walkableLayerIds.size || !this.character) return true;
-    const masks = [...this.walkableLayerIds].map(id => this.maskImages.get(id)).filter(Boolean);
-    if (!masks.length) return false;
+    if (!this.character) return true;
+    if (!this.walkableConfigured) return true;
+    if (!this.finalWalkableMask) return false;
     return footprintIsWalkable(
-      (x, y) => masks.some(mask => this.maskContains(mask, x, y)), position,
+      (x, y) => this.maskContains(this.finalWalkableMask, x, y), position,
       this.character.footpoint, this.characterScale,
     );
   }
@@ -870,7 +922,7 @@ export class CanvasEditor extends EventTarget {
         let overlay = this.maskOverlays.get(layer.id);
         if (!overlay) {
           const walkable = layer.kind === "walkable";
-          overlay = this.createTintedMask(mask, walkable ? [64, 220, 130] : [63, 210, 230], walkable ? .34 : .42);
+          overlay = this.createTintedMask(mask, walkable ? [168, 85, 247] : [63, 210, 230], walkable ? .36 : .42);
           if (overlay) this.maskOverlays.set(layer.id, overlay);
         }
         if (overlay) c.drawImage(overlay, 0, 0);
@@ -879,8 +931,8 @@ export class CanvasEditor extends EventTarget {
     if (!this.previewMode) this.drawOcclusionLines(c);
     c.lineWidth = 2 / this.view.scale;
     const editingWalkable = this.walkableLayerIds.has(this.maskEditLayerId);
-    c.strokeStyle = editingWalkable ? "#40dc82" : "#63d5e6";
-    c.fillStyle = editingWalkable ? "#40dc8222" : "#63d5e622";
+    c.strokeStyle = editingWalkable ? "#a855f7" : "#63d5e6";
+    c.fillStyle = editingWalkable ? "#a855f722" : "#63d5e622";
     if (this.drag?.type === "box") {
       const a = this.drag.start;
       const b = this.drag.current;
@@ -907,7 +959,7 @@ export class CanvasEditor extends EventTarget {
       c.lineCap = "round";
       c.lineJoin = "round";
       const walkable = this.walkableLayerIds.has(this.maskEditLayerId);
-      c.strokeStyle = this.tool === "brush" ? (walkable ? "#40dc8299" : "#63d5e699") : "#ff7a8a99";
+      c.strokeStyle = this.tool === "brush" ? (walkable ? "#a855f799" : "#63d5e699") : "#ff7a8a99";
       c.stroke();
     } else if (this.lasso?.points.length) {
       this.drawOpenLasso(c);
@@ -917,30 +969,40 @@ export class CanvasEditor extends EventTarget {
   drawOcclusionLines(c) {
     for (const layer of this.layers) {
       if (this.hiddenOcclusionInfo.has(layer.id)) continue;
-      const lines = this.occlusionLinesFor(layer);
-      for (let index = 0; index < lines.length; index += 1) {
-        const selected = this.selectedOcclusionLine?.layerId === layer.id
-          && this.selectedOcclusionLine?.index === index;
-        this.drawOcclusionLine(c, lines[index], selected);
+      for (const [field, color, nodeColor] of [
+        ["occlusion_lines", "#ff9f43", "#ffd166"],
+        ["walkable_boundary_lines", "#b56cff", "#e4c1ff"],
+      ]) {
+        const dragged = this.drag?.type === "occlusion-node" && this.drag.layerId === layer.id
+          && this.drag.field === field ? this.drag.lines : null;
+        const lines = dragged || layer[field] || [];
+        for (let index = 0; index < lines.length; index += 1) {
+          const selected = this.selectedOcclusionLine?.layerId === layer.id
+            && this.selectedOcclusionLine?.field === field
+            && this.selectedOcclusionLine?.index === index;
+          this.drawOcclusionLine(c, lines[index], selected, color, nodeColor);
+        }
       }
     }
     if (this.occlusionDraft?.length) {
-      this.drawOcclusionLine(c, this.occlusionDraft.map(point => [point.x, point.y]), false);
+      const boundary = this.lineField === "walkable_boundary_lines";
+      this.drawOcclusionLine(c, this.occlusionDraft.map(point => [point.x, point.y]), false,
+        boundary ? "#b56cff" : "#ff9f43", boundary ? "#e4c1ff" : "#ffd166");
     }
   }
 
-  drawOcclusionLine(c, region, selected) {
+  drawOcclusionLine(c, region, selected, color = "#ff9f43", nodeColor = "#ffd166") {
     if (!region.length) return;
     c.beginPath();
     c.moveTo(region[0][0], region[0][1]);
     for (let index = 1; index < region.length; index += 1) c.lineTo(region[index][0], region[index][1]);
     c.lineWidth = (selected ? 4 : 2) / this.view.scale;
-    c.strokeStyle = selected ? "#fff176" : "#ff9f43";
+    c.strokeStyle = selected ? "#fff176" : color;
     c.stroke();
     for (const point of region) {
       c.beginPath();
       c.arc(point[0], point[1], 4 / this.view.scale, 0, Math.PI * 2);
-      c.fillStyle = "#ffd166";
+      c.fillStyle = nodeColor;
       c.fill();
     }
   }
@@ -949,7 +1011,7 @@ export class CanvasEditor extends EventTarget {
     const pts = this.lasso.points;
     const adding = this.lasso.tool === "lasso-add";
     const walkable = this.walkableLayerIds.has(this.maskEditLayerId);
-    const color = adding ? (walkable ? "#40dc82" : "#63d5e6") : "#ff7a8a";
+    const color = adding ? (walkable ? "#a855f7" : "#63d5e6") : "#ff7a8a";
     const scale = this.displayedScale();
     const near = Boolean(this.lasso.cursor && canCloseLasso(pts, this.lasso.cursor, scale));
     c.beginPath();
@@ -960,7 +1022,7 @@ export class CanvasEditor extends EventTarget {
     c.lineWidth = 2 / this.view.scale;
     c.strokeStyle = color;
     if (near) {
-      c.fillStyle = adding ? (walkable ? "#40dc8255" : "#63d5e655") : "#ff7a8a55";
+      c.fillStyle = adding ? (walkable ? "#a855f755" : "#63d5e655") : "#ff7a8a55";
       c.fill();
     }
     c.stroke();

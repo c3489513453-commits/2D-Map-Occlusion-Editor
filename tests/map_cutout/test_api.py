@@ -67,6 +67,8 @@ def test_page_has_resource_and_walkable_layer_switch(tmp_path):
     assert 'id="layer-mode"' in html
     assert 'data-mode="resources"' in html
     assert 'data-mode="walkable"' in html
+    assert 'id="auto-walkable-boundaries"' in html
+    assert 'id="draw-line-tool"' in html
 
 
 def test_character_png_and_scale_persist_in_project(tmp_path):

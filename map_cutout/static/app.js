@@ -1,7 +1,7 @@
-import { AppState, ApiClient } from "/static/state.js?v=character-delete4";
-import { CanvasEditor } from "/static/canvas_editor.js?v=character-delete4";
-import { LayerTree } from "/static/layer_tree.js?v=character-delete4";
-import { InferenceControls } from "/static/inference_controls.js?v=character-delete4";
+import { AppState, ApiClient } from "/static/state.js?v=resource-walkability1";
+import { CanvasEditor } from "/static/canvas_editor.js?v=resource-walkability1";
+import { LayerTree } from "/static/layer_tree.js?v=resource-walkability1";
+import { InferenceControls } from "/static/inference_controls.js?v=resource-walkability1";
 import { ExportDialog } from "/static/export_dialog.js";
 import { opaqueFootpoint } from "/static/occlusion_preview.js";
 
@@ -11,6 +11,7 @@ let toastTimer;
 const editor = new CanvasEditor($("#canvas-shell"), $("#canvas-stage"), $("#map-image"), $("#mask-canvas"));
 state.editingLayerId = null;
 let occlusionEditingLayerId = null;
+let walkableBoundaryEditingLayerId = null;
 let previewMode = false;
 let toolBeforePreview = "select";
 let layerPanelMode = "resources";
@@ -21,6 +22,7 @@ const layerTree = new LayerTree($("#layer-tree"), {
   onSelect: (id, additive) => state.toggleLayerSelection(id, additive),
   onEdit: id => beginMaskEdit(id),
   onDrawOcclusion: id => beginOcclusionDrawing(id),
+  onDrawWalkableBoundary: id => beginWalkableBoundaryDrawing(id),
   onToggleOcclusionInfo: () => editor.setOcclusionInfoHidden(layerTree.hiddenOcclusion),
   onClearOcclusion: id => saveOcclusionLines(id, []),
   onPatch: (id, changes) => action(async () => { await state.api.patch(`${layerBase()}/${id}`, changes); state.setDirty(true); await state.loadLayers(); }),
@@ -94,6 +96,10 @@ function renderMaps() {
   })));
   editor.setLayers(editorLayers);
   editor.setWalkableLayers(state.walkableLayers.map(layer => layer.id));
+  editor.setResourceMasks(state.layers.filter(layer => layer.kind !== "original" && layer.mask_path).map(layer => layer.id));
+  editor.setWalkableConfigured(Boolean(state.walkableLayers.length
+    || state.layers.some(layer => layer.walkable_boundary_lines?.length)));
+  if (editor.finalWalkableMapId !== state.currentMapId) editor.loadFinalWalkable(state.currentMapId);
   editor.setOcclusionInfoHidden(layerTree.hiddenOcclusion);
   if (state.editingLayerId && ![...state.layers, ...state.walkableLayers].some(layer => layer.id === state.editingLayerId)) {
     state.editingLayerId = null;
@@ -126,7 +132,8 @@ function renderLayers() {
   const layers = layerPanelMode === "walkable" ? state.walkableLayers : state.orderedLayers();
   $("#layer-empty").hidden = layers.length > 0;
   layerTree.render(layers, activePanelFolders(), state.selectedLayerIds, state.editingLayerId,
-    layerPanelMode === "resources" ? occlusionEditingLayerId : null);
+    layerPanelMode === "resources" ? occlusionEditingLayerId : null,
+    layerPanelMode === "resources" ? walkableBoundaryEditingLayerId : null);
 }
 
 function render() {
@@ -140,7 +147,9 @@ async function action(work) { try { await work(); } catch (error) { toast(error.
 function resetSpatialEditing() {
   if (previewMode) $("#preview-mode").click();
   occlusionEditingLayerId = null;
+  walkableBoundaryEditingLayerId = null;
   editor.setOcclusionEditing(null);
+  $("#draw-line-tool").textContent = "画底线";
 }
 
 $("#layer-mode").addEventListener("click", event => {
@@ -204,8 +213,8 @@ $("#import-image").addEventListener("click",()=>action(async()=>{await inference
 $("#import-folder").addEventListener("click",()=>action(async()=>{await inferenceControls.flushPendingEdits();resetSpatialEditing();const {path}=await state.api.get("/api/dialog/folder?title=选择地图文件夹");if(!path)return;const maps=await state.api.post("/api/import/folder",{path});await state.loadMaps();if(maps.length)await state.selectMap(maps[0].id);state.setDirty(true);state.setStatus(`已导入 ${maps.length} 张地图`);}));
 function activateTool(tool) {
   if (previewMode && tool !== "select") return;
-  if (tool === "occlusion" && !occlusionEditingLayerId) {
-    toast("请先在右侧图层点击「编辑底线」");
+  if (tool === "occlusion" && !occlusionEditingLayerId && !walkableBoundaryEditingLayerId) {
+    toast("请先在右侧图层点击「编辑底线」或「编辑可走」");
     return;
   }
   document.querySelectorAll("[data-tool]").forEach(item => item.classList.toggle("active", item.dataset.tool === tool));
@@ -221,8 +230,21 @@ async function saveOcclusionLines(layerId, lines) {
   const index = state.layers.findIndex(layer => layer.id === layerId);
   if (index >= 0) state.layers[index] = updated;
   state.setDirty(true);
-  editor.setLayers(state.layers.map(layer => ({...layer, map_id: state.currentMapId})));
+  state.emit();
   state.setStatus(lines.length ? "底线已保存" : "底线已清除");
+}
+async function refreshFinalWalkable() {
+  if (state.currentMapId) await editor.loadFinalWalkable(state.currentMapId);
+}
+async function saveWalkableBoundaryLines(layerId, lines) {
+  if (!state.currentMapId) return;
+  const updated = await state.api.put(`/api/maps/${state.currentMapId}/layers/${layerId}/walkable-boundary-lines`, {lines});
+  const index = state.layers.findIndex(layer => layer.id === layerId);
+  if (index >= 0) state.layers[index] = updated;
+  state.setDirty(true);
+  await refreshFinalWalkable();
+  state.emit();
+  state.setStatus(lines.length ? "资源可走边界已保存" : "资源可走边界已清除");
 }
 function beginOcclusionDrawing(id) {
   if (previewMode) return;
@@ -231,27 +253,58 @@ function beginOcclusionDrawing(id) {
     editor.setOcclusionEditing(null);
     activateTool("select");
     state.setStatus("已退出底线编辑");
+    $("#draw-line-tool").textContent = "画底线";
     state.emit();
     return;
   }
   const layer = state.layers.find(item => item.id === id);
   if (!layer?.mask_path) { toast("底图不能绘制遮挡"); return; }
   state.editingLayerId = null;
+  walkableBoundaryEditingLayerId = null;
   editor.setMaskEdit(null);
   editor.cancelLasso();
   state.selectedLayerIds = new Set([id]);
   occlusionEditingLayerId = id;
   editor.setOcclusionEditing(id);
+  $("#draw-line-tool").textContent = "画底线";
   activateTool("select");
   state.setStatus(`正在编辑「${layer.name}」底线：拖动节点调整，点击线段后可按 Delete 删除；新画请点击下方「画底线」。`);
+  state.emit();
+}
+function beginWalkableBoundaryDrawing(id) {
+  if (previewMode) return;
+  if (walkableBoundaryEditingLayerId === id) {
+    walkableBoundaryEditingLayerId = null;
+    editor.setWalkableBoundaryEditing(null);
+    activateTool("select");
+    state.setStatus("已退出可走边界编辑");
+    $("#draw-line-tool").textContent = "画底线";
+    state.emit();
+    return;
+  }
+  const layer = state.layers.find(item => item.id === id);
+  if (!layer?.mask_path) { toast("底图不能设置可走边界"); return; }
+  state.editingLayerId = null;
+  occlusionEditingLayerId = null;
+  editor.setMaskEdit(null);
+  editor.cancelLasso();
+  state.selectedLayerIds = new Set([id]);
+  walkableBoundaryEditingLayerId = id;
+  editor.setWalkableBoundaryEditing(id);
+  $("#draw-line-tool").textContent = "画可走线";
+  activateTool("select");
+  state.setStatus(`正在编辑「${layer.name}」可走边界：线上方可走、线下方不可走；节点可拖动，线段选中后可按 Delete 删除。`);
   state.emit();
 }
 function beginMaskEdit(id, tool = "lasso-add") {
   const layer = activePanelLayers().find(item => item.id === id);
   if (!layer?.mask_path) { toast("底图不能这样改"); return; }
+  if (state.editingLayerId === id) { finishMaskEdit(); state.emit(); return; }
   if (state.editingLayerId !== id) editor.cancelLasso();
   occlusionEditingLayerId = null;
+  walkableBoundaryEditingLayerId = null;
   editor.setOcclusionEditing(null);
+  $("#draw-line-tool").textContent = "画底线";
   state.editingLayerId = id;
   state.selectedLayerIds = new Set([id]);
   editor.setMaskEdit(id);
@@ -281,6 +334,10 @@ editor.addEventListener("need-edit", () => toast("请先在右侧图层上点击
 editor.addEventListener("occlusion-lines", event => action(async () => {
   await saveOcclusionLines(event.detail.layerId, event.detail.lines);
 }));
+editor.addEventListener("walkable-boundary-lines", event => action(async () => {
+  await saveWalkableBoundaryLines(event.detail.layerId, event.detail.lines);
+}));
+editor.addEventListener("walkable-updated", () => action(refreshFinalWalkable));
 editor.addEventListener("character-delete", () => action(async () => {
   await state.api.delete("/api/character");
   editor.clearCharacter();
@@ -365,6 +422,17 @@ $("#auto-baselines").addEventListener("click", () => action(async () => {
     : "没有需要生成的底线");
 }));
 
+$("#auto-walkable-boundaries").addEventListener("click", () => action(async () => {
+  if (!state.currentMapId) throw new Error("请先导入地图");
+  const result = await state.api.post(`/api/maps/${state.currentMapId}/walkable-boundary-lines/auto`, {});
+  await state.loadLayers();
+  await refreshFinalWalkable();
+  state.setDirty(true);
+  state.setStatus(result.created
+    ? `已为 ${result.created} 个新资源生成可走边界，之前精调过的没有被覆盖`
+    : "没有需要补充可走边界的资源");
+}));
+
 $("#import-character").addEventListener("click", () => $("#character-file").click());
 $("#delete-character").addEventListener("click", () => {
   if (!editor.character) { toast("当前没有可以删除的小人"); return; }
@@ -437,3 +505,4 @@ $("#preview-mode").addEventListener("click", () => {
 });
 
 action(async()=>{state.setStatus("正在读取项目",true);await state.loadMaps();await restoreCharacter();state.setStatus("准备就绪");});
+

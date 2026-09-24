@@ -26,7 +26,7 @@ dialog{width:min(520px,calc(100vw - 40px));border:1px solid #3a4d65;border-radiu
 .map-card .map-delete{border:0;background:transparent;color:#ff8b98;font-size:.7rem;padding:4px 6px}
 .map-card .map-delete:hover{color:var(--danger);background:#ff65771a}
 .layer-rename{width:100%;min-width:0;padding:2px 4px;background:#0b111a;border:1px solid var(--accent);border-radius:4px;color:var(--text);font:inherit}
-.layer-row .draw-occlusion.active{background:#5b3a16;color:#ffd28a}
-.layer-mode{display:flex;gap:3px;padding:3px;background:#0b121c;border:1px solid var(--line);border-radius:7px}.layer-mode button{border:0;background:transparent;padding:.3rem .52rem;font-size:.76rem;color:var(--muted)}.layer-mode button.active{background:#223d4a;color:#8ee9f4}.walkable-dot{color:#40dc82}.walkable-row{cursor:default}
+.layer-row .draw-occlusion.active{background:#5b3a16;color:#ffd28a}.layer-row .draw-walkable-boundary{font-size:.68rem;color:#d8b4fe;white-space:nowrap}.layer-row .draw-walkable-boundary.active,.layer-row .edit.active{background:#41275d;color:#ead5ff}
+.layer-mode{display:flex;gap:3px;padding:3px;background:#0b121c;border:1px solid var(--line);border-radius:7px}.layer-mode button{border:0;background:transparent;padding:.3rem .52rem;font-size:.76rem;color:var(--muted)}.layer-mode button.active{background:#223d4a;color:#8ee9f4}.walkable-dot{color:#a855f7}.walkable-row{cursor:default}
 .layer-actions[hidden],.heading-actions[hidden],#walkable-brush[hidden]{display:none!important}
 .toolbar button.active{background:#5b3b16;border-color:#ffd166;color:#fff3b0}

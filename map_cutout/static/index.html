@@ -14,7 +14,7 @@
     <nav class="toolbar" aria-label="项目工具">
       <button id="new-project">新建项目</button><button id="open-project">打开项目</button>
       <button id="import-image">导入图片</button><button id="import-folder">导入文件夹</button>
-      <input id="character-file" type="file" accept="image/png" hidden><button id="import-character">导入小人</button><button id="delete-character" title="显示小人右上角的删除按钮">删除小人</button><label class="character-scale" title="小人显示大小">大小 <input id="character-scale" type="range" min="10" max="300" value="100"></label><button id="auto-baselines">自动底线</button><button id="preview-mode">预览</button>
+      <input id="character-file" type="file" accept="image/png" hidden><button id="import-character">导入小人</button><button id="delete-character" title="显示小人右上角的删除按钮">删除小人</button><label class="character-scale" title="小人显示大小">大小 <input id="character-scale" type="range" min="10" max="300" value="100"></label><button id="auto-baselines">自动底线</button><button id="auto-walkable-boundaries">自动可走</button><button id="preview-mode">预览</button>
       <span class="divider"></span><button id="undo" title="Ctrl+Z">撤销</button><button id="redo">重做</button>
       <button id="save" class="primary" title="Ctrl+S">保存</button>
     </nav>
@@ -53,7 +53,7 @@
       <div class="bottom-tools" role="toolbar" aria-label="画布工具">
         <button data-tool="select" class="active" title="点击蒙版选择图层，拖动小人测试位置">↖ 选择与移动</button><button data-tool="box" title="没在编辑图层时，框选用来生成新蒙版；正在编辑时，会识别方框里的区域并加进当前图层">框选</button>
         <button data-tool="positive">正点</button><button data-tool="negative">负点</button>
-        <button id="walkable-brush" data-tool="brush" hidden>画笔</button><button data-tool="eraser">橡皮</button><button data-tool="occlusion" title="进入底线编辑后，左键增加节点，右键完成">画底线</button>
+        <button id="walkable-brush" data-tool="brush" hidden>画笔</button><button data-tool="eraser">橡皮</button><button id="draw-line-tool" data-tool="occlusion" title="进入线条编辑后，左键增加节点，右键完成">画底线</button>
         <button data-tool="lasso-add">套索增加</button><button data-tool="lasso-subtract">套索减去</button>
         <span class="spacer"></span><button id="zoom-out">−</button><span id="zoom-label">100%</span><button id="zoom-in">＋</button>
       </div>
@@ -79,6 +79,7 @@
       <div class="export-result" hidden></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" class="primary">开始导出</button></div>
     </form>
   </dialog>
-  <script type="module" src="/static/app.js?v=character-delete4"></script>
+  <script type="module" src="/static/app.js?v=resource-walkability1"></script>
 </body>
 </html>
+

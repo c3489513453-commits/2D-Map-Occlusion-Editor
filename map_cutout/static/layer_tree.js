@@ -66,10 +66,12 @@ export class LayerTree {
     if (editing) classes.push("editing");
     if (layer.kind === "original") classes.push("original");
     const occlusionEditing = this.occlusionEditingId === layer.id;
+    const boundaryEditing = this.boundaryEditingId === layer.id;
+    const maskEditing = this.editingId === layer.id;
     const editButtons = layer.mask_path
       ? layer.kind === "walkable"
-        ? `<button type="button" class="toggle edit" data-action="edit" aria-label="编辑行走区域">编辑</button><button type="button" class="toggle delete" data-action="delete" aria-label="删除图层">删除</button>`
-        : `<button type="button" class="toggle edit" data-action="edit" aria-label="编辑蒙版">编辑</button><button type="button" class="toggle draw-occlusion ${occlusionEditing ? "active" : ""}" data-action="draw-occlusion" aria-label="${occlusionEditing ? "退出底线编辑" : "编辑底线"}">${occlusionEditing ? "退出编辑" : "编辑底线"}</button>${layer.occlusion_lines?.length ? '<button type="button" class="toggle clear-occlusion" data-action="clear-occlusion" aria-label="清除底线">×</button>' : ''}<button type="button" class="toggle delete" data-action="delete" aria-label="删除图层">删除</button>`
+        ? `<button type="button" class="toggle edit ${maskEditing ? "active" : ""}" data-action="edit" aria-label="编辑行走区域">${maskEditing ? "退出编辑" : "编辑"}</button><button type="button" class="toggle delete" data-action="delete" aria-label="删除图层">删除</button>`
+        : `<button type="button" class="toggle edit" data-action="edit" aria-label="编辑蒙版">编辑</button><button type="button" class="toggle draw-occlusion ${occlusionEditing ? "active" : ""}" data-action="draw-occlusion" aria-label="${occlusionEditing ? "退出底线编辑" : "编辑底线"}">${occlusionEditing ? "退出编辑" : "编辑底线"}</button><button type="button" class="toggle draw-walkable-boundary ${boundaryEditing ? "active" : ""}" data-action="draw-walkable-boundary" aria-label="${boundaryEditing ? "退出可走边界编辑" : "编辑可走"}">${boundaryEditing ? "退出编辑" : "编辑可走"}</button>${layer.occlusion_lines?.length ? '<button type="button" class="toggle clear-occlusion" data-action="clear-occlusion" aria-label="清除底线">×</button>' : ''}<button type="button" class="toggle delete" data-action="delete" aria-label="删除图层">删除</button>`
       : "";
     const occlusionToggle = layer.mask_path && layer.kind !== "walkable"
       ? `<button type="button" class="toggle occlusion-info ${this.hiddenOcclusion.has(layer.id) ? "" : "on"}" data-action="occlusion-info" aria-label="显示或隐藏遮挡信息">${this.hiddenOcclusion.has(layer.id) ? "○" : "●"}</button>`
@@ -77,12 +79,13 @@ export class LayerTree {
     return `<div class="${classes.join(" ")}" data-layer-id="${layer.id}" draggable="${layer.kind !== "original"}"${hidden ? " hidden" : ""}><button type="button" class="toggle visibility ${layer.visible ? "on" : ""}" data-action="visibility" aria-label="显示或隐藏">${layer.visible ? "◉" : "○"}</button><span class="layer-name name">${escapeHtml(layer.name)}</span>${editButtons}${occlusionToggle}</div>`;
   }
 
-  render(layers, folders, selected = this.selected, editingId = this.editingId, occlusionEditingId = this.occlusionEditingId) {
+  render(layers, folders, selected = this.selected, editingId = this.editingId, occlusionEditingId = this.occlusionEditingId, boundaryEditingId = this.boundaryEditingId) {
     this.layers = layers;
     this.folders = folders;
     this.selected = selected;
     this.editingId = editingId;
     this.occlusionEditingId = occlusionEditingId;
+    this.boundaryEditingId = boundaryEditingId;
     const original = layers.find(layer => layer.kind === "original");
     const grouped = new Set();
     let html = "";
@@ -168,6 +171,7 @@ export class LayerTree {
     if (action === "delete") this.callbacks.onDelete?.(id);
     else if (action === "edit") this.callbacks.onEdit?.(id);
     else if (action === "draw-occlusion") this.callbacks.onDrawOcclusion?.(id);
+    else if (action === "draw-walkable-boundary") this.callbacks.onDrawWalkableBoundary?.(id);
     else if (action === "clear-occlusion") this.callbacks.onClearOcclusion?.(id);
     else if (action === "occlusion-info") {
       this.hiddenOcclusion.has(id) ? this.hiddenOcclusion.delete(id) : this.hiddenOcclusion.add(id);
