@@ -64,6 +64,42 @@ def test_short_boundary_leaves_uncovered_resource_pixels_blocked():
     assert not passable[2, 1]
 
 
+def test_side_closures_only_block_the_area_below_the_middle_boundary():
+    mask = np.ones((12, 14), dtype=bool)
+    passable, obstacle = resource_walkable_and_obstacle(
+        mask,
+        [[[3, 11], [3, 4], [10, 7], [10, 11]]],
+    )
+
+    assert passable[9, 1]
+    assert passable[2, 6]
+    assert obstacle[9, 6]
+    assert passable[9, 12]
+
+
+def test_plain_sloped_boundary_keeps_existing_uncovered_column_behavior():
+    mask = np.ones((12, 14), dtype=bool)
+    passable, obstacle = resource_walkable_and_obstacle(
+        mask,
+        [[[3, 4], [10, 7]]],
+    )
+
+    assert passable[2, 6]
+    assert obstacle[9, 6]
+    assert obstacle[2, 1]
+
+
+def test_verticalish_end_segments_that_do_not_drop_to_bottom_are_not_side_closures():
+    mask = np.ones((12, 14), dtype=bool)
+    passable, obstacle = resource_walkable_and_obstacle(
+        mask,
+        [[[3, 4], [3, 8], [10, 7], [10, 3]]],
+    )
+
+    assert obstacle[2, 1]
+    assert not passable[2, 1]
+
+
 def test_overlapping_resource_obstacle_wins_over_other_resource_passable():
     manual = np.ones((10, 10), dtype=bool)
     resource_a = np.zeros_like(manual); resource_a[:, 2:8] = True

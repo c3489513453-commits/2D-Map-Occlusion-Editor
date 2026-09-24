@@ -65,25 +65,40 @@ def adaptive_walkable_boundary(mask: np.ndarray) -> list[list[float]]:
     return lines[0] if lines else []
 
 
-def _boundary_by_x(lines: list[list[list[float]]], width: int) -> np.ndarray:
+def _line_boundary_by_x(points: list[list[float]], width: int) -> np.ndarray:
     result = np.full(width, np.nan, dtype=np.float64)
-    if not lines or len(lines[0]) < 2:
+    if len(points) < 2:
         return result
-    points = lines[0]
     for start, end in zip(points, points[1:]):
         x1, y1 = float(start[0]), float(start[1])
         x2, y2 = float(end[0]), float(end[1])
         if x1 == x2:
             column = int(round(x1))
             if 0 <= column < width:
-                result[column] = min(y1, y2)
+                value = min(y1, y2)
+                result[column] = value if np.isnan(result[column]) else min(result[column], value)
             continue
         lo = max(0, int(math.ceil(min(x1, x2))))
         hi = min(width - 1, int(math.floor(max(x1, x2))))
         for x in range(lo, hi + 1):
             ratio = (x - x1) / (x2 - x1)
-            result[x] = y1 + (y2 - y1) * ratio
+            value = y1 + (y2 - y1) * ratio
+            result[x] = value if np.isnan(result[x]) else min(result[x], value)
     return result
+
+
+def _has_side_closures(points: list[list[float]]) -> bool:
+    if len(points) < 4:
+        return False
+    segments = ((points[0], points[1]), (points[-2], points[-1]))
+    vertical = all(
+        abs(float(end[0]) - float(start[0]))
+        <= max(2.0, abs(float(end[1]) - float(start[1])) * .10)
+        and abs(float(end[1]) - float(start[1])) >= 2.0
+        for start, end in segments
+    )
+    return vertical and float(points[0][1]) > float(points[1][1]) \
+        and float(points[-1][1]) > float(points[-2][1])
 
 
 def resource_walkable_and_obstacle(
@@ -91,10 +106,20 @@ def resource_walkable_and_obstacle(
     lines: list[list[list[float]]],
 ) -> tuple[np.ndarray, np.ndarray]:
     resource = np.asarray(mask, dtype=bool)
-    boundaries = _boundary_by_x(lines, resource.shape[1])
     yy = np.arange(resource.shape[0], dtype=np.float64)[:, None]
-    covered = np.isfinite(boundaries)[None, :]
-    passable = resource & covered & (yy < boundaries[None, :])
+    closed_lines = [line for line in lines if _has_side_closures(line)]
+    if closed_lines:
+        obstacle = np.zeros_like(resource)
+        for line in closed_lines:
+            boundaries = _line_boundary_by_x(line, resource.shape[1])
+            covered = np.isfinite(boundaries)[None, :]
+            obstacle |= resource & covered & (yy >= boundaries[None, :])
+        return resource & ~obstacle, obstacle
+    passable = np.zeros_like(resource)
+    for line in lines:
+        boundaries = _line_boundary_by_x(line, resource.shape[1])
+        covered = np.isfinite(boundaries)[None, :]
+        passable |= resource & covered & (yy < boundaries[None, :])
     return passable, resource & ~passable
 
 
