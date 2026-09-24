@@ -128,6 +128,22 @@ def test_import_image_starts_without_walkable_layers(tmp_path):
     assert loaded.state.maps[0].walkable_layers == []
 
 
+def test_old_project_layer_defaults_walkable_boundary_lines_to_empty(tmp_path):
+    root = tmp_path / "legacy"
+    root.mkdir()
+    (root / "project.json").write_text(json.dumps({
+        "name": "legacy",
+        "maps": [{
+            "id": "map", "source_path": "missing.png", "width": 8, "height": 8,
+            "layers": [{"id": "tree", "name": "树", "kind": "mask"}],
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    loaded = ProjectStore.load(root)
+
+    assert loaded.state.maps[0].layers[0].walkable_boundary_lines == []
+
+
 def test_legacy_walkable_mask_migrates_to_layer(tmp_path):
     image_path = tmp_path / "地图.png"
     write_image(image_path, (32, 24))

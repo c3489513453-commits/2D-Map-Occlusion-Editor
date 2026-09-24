@@ -42,6 +42,7 @@ def _layer_from_dict(data: dict) -> LayerState:
         **data,
         "occlusion_regions": data.get("occlusion_regions", []),
         "occlusion_lines": lines,
+        "walkable_boundary_lines": data.get("walkable_boundary_lines", []),
     })
 
 

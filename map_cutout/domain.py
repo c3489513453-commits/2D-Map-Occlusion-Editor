@@ -29,6 +29,7 @@ class LayerState:
     folder_id: str | None = None
     occlusion_regions: list[list[list[float]]] = field(default_factory=list)
     occlusion_lines: list[list[list[float]]] = field(default_factory=list)
+    walkable_boundary_lines: list[list[list[float]]] = field(default_factory=list)
 
     @classmethod
     def mask_layer(
