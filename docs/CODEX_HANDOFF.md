@@ -18,7 +18,7 @@ D:\06\剧本\地图抠图\Grounded-SAM-2
 
 ```text
 origin     https://github.com/IDEA-Research/Grounded-SAM-2.git
-user-fork  https://github.com/c3489513453-commits/Asset-identification-output.git
+user-fork  https://github.com/c3489513453-commits/2D-Map-Occlusion-Editor.git
 ```
 
 `origin` 是上游开源项目，不要推送。用户的仓库是 `user-fork`。需要推送时只用 `git push user-fork HEAD:main`，并且先得到用户明确同意。上一次准备推送 `7e953c1` 时，用户跳过了批准，所以那个提交目前只在本机。

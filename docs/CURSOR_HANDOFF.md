@@ -25,7 +25,7 @@ D:\06\剧本\地图抠图\项目输出
 项目最初 fork 自 IDEA-Research/Grounded-SAM-2，当前自定义工具代码公开在：
 
 ```text
-https://github.com/c3489513453-commits/Asset-identification-output
+https://github.com/c3489513453-commits/2D-Map-Occlusion-Editor
 ```
 
 本工具当前只负责生成和导出分离后的透明素材，不负责游戏中的人物遮挡逻辑。后续游戏侧会通过素材最低线等方式处理遮挡关系。
@@ -235,7 +235,7 @@ http://127.0.0.1:7875/tests/web/layer_tree.test.html
 
 ```text
 origin     https://github.com/IDEA-Research/Grounded-SAM-2.git
-user-fork  https://github.com/c3489513453-commits/Asset-identification-output.git
+user-fork  https://github.com/c3489513453-commits/2D-Map-Occlusion-Editor.git
 ```
 
 - `origin` 是上游开源项目，主要用于参考或同步，不要把本项目改动推送到这里。
