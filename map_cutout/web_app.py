@@ -32,7 +32,7 @@ from .jobs import JobManager
 from .masks import paint_circle, paint_polygon, take_unoccupied, to_mask_image
 from .occlusion import baseline_lines_from_mask
 from .project_store import ProjectStore, load_startup_project, remember_project
-from .walkability import adaptive_walkable_boundary, compose_final_walkable
+from .walkability import adaptive_walkable_boundaries, compose_final_walkable
 
 
 class DiskMaskRepository:
@@ -721,9 +721,9 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         for layer in candidates:
             if layer.walkable_boundary_lines:
                 continue
-            line = adaptive_walkable_boundary(repository.load(layer.mask_path))
-            if line:
-                changes.append((layer, [line]))
+            lines = adaptive_walkable_boundaries(repository.load(layer.mask_path))
+            if lines:
+                changes.append((layer, lines))
         if changes:
             history(map_id).execute(SetManyWalkableBoundaryLinesCommand(changes))
             services.project.dirty = True

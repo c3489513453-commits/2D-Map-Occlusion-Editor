@@ -1,6 +1,6 @@
 <!doctype html><meta charset="utf-8"><title>RUNNING</title>
 <script type="module">
-import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload,canCloseLasso,lassoCommitPoints,topMaskId,footprintIsWalkable,CanvasEditor} from "/static/canvas_editor.js?v=walkable1";
+import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload,canCloseLasso,lassoCommitPoints,topMaskId,footprintIsWalkable,CanvasEditor} from "/static/canvas_editor.js?v=walkable2";
 import {InferenceControls} from "/static/inference_controls.js";
 import {pointInPolygon,opaqueFootpoint,footIsBehindLine,footprintIsBehindLine,nearestLineIndex,nearestLineNode} from "/static/occlusion_preview.js?v=footprint-occlusion2";
 try{
@@ -129,6 +129,14 @@ try{
  if(!lit(12,4)||!lit(12,14)||!lit(24,12))throw Error("后画的区域没有留在原来的蒙版上");
  if(lit(3,3))throw Error("减去的区域还留在蒙版上");
  if(editor.maskImages.get("layer")!==editor.maskCanvases.get("layer"))throw Error("刷新蒙版时丢掉了正在编辑的选区");
+ const road=document.createElement("canvas");road.width=32;road.height=32;road.getContext("2d").fillStyle="#fff";road.getContext("2d").fillRect(0,0,32,32);
+ const resource=document.createElement("canvas");resource.width=32;resource.height=32;resource.getContext("2d").fillStyle="#000";resource.getContext("2d").fillRect(0,0,32,32);resource.getContext("2d").fillStyle="#fff";resource.getContext("2d").fillRect(10,10,6,6);
+ editor.maskImages.set("road",road);editor.maskImages.set("resource",resource);editor.setWalkableLayers(["road"]);editor.setResourceMasks(["resource"]);
+ editor.editMaskLocally("road",{points:[[4,4]],radius:2,value:255});
+ const clippedRoad=editor.maskCanvases.get("road").getContext("2d").getImageData(0,0,32,32).data;
+ const roadLit=(x,y)=>clippedRoad[(y*32+x)*4]>200;
+ if(!roadLit(4,4))throw Error("资源蒙版黑色背景把整张道路预览清空了");
+ if(roadLit(12,12))throw Error("资源蒙版白色区域没有从道路预览扣除");
  const small=document.createElement("canvas"); small.width=8; small.height=8;
  await new Promise(resolve=>{image.onload=resolve; image.src=small.toDataURL();});
  const wide=document.createElement("canvas"); wide.width=16; wide.height=16;

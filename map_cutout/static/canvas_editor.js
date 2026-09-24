@@ -98,6 +98,7 @@ export class CanvasEditor extends EventTarget {
     this.selectedOcclusionLine = null;
     this.hiddenOcclusionInfo = new Set();
     this.foregroundOverlays = new Map();
+    this.resourceAlphaMasks = new Map();
     this.walkableLayerIds = new Set();
     this.resourceMaskIds = new Set();
     this.finalWalkableMask = null;
@@ -339,6 +340,7 @@ export class CanvasEditor extends EventTarget {
     this.maskImages.delete(id);
     this.maskOverlays.delete(id);
     this.foregroundOverlays.delete(id);
+    this.resourceAlphaMasks.delete(id);
     this.maskCanvases.delete(id);
     this.maskLoadToken.set(id, (this.maskLoadToken.get(id) || 0) + 1);
     this.maskVersions.set(id, (this.maskVersions.get(id) || 0) + 1);
@@ -351,6 +353,7 @@ export class CanvasEditor extends EventTarget {
     this.maskImages.clear();
     this.maskOverlays.clear();
     this.foregroundOverlays.clear();
+    this.resourceAlphaMasks.clear();
     this.maskLoading.clear();
     this.maskLoadToken.clear();
   }
@@ -362,6 +365,7 @@ export class CanvasEditor extends EventTarget {
     this.maskImages.delete(layerId);
     this.maskOverlays.delete(layerId);
     this.foregroundOverlays.delete(layerId);
+    this.resourceAlphaMasks.delete(layerId);
     this.maskLoading.delete(layerId);
     this.maskLoadToken.set(layerId, (this.maskLoadToken.get(layerId) || 0) + 1);
     this.maskVersions.set(layerId, (this.maskVersions.get(layerId) || 0) + 1);
@@ -423,7 +427,13 @@ export class CanvasEditor extends EventTarget {
       context.globalCompositeOperation = "destination-out";
       for (const resourceId of this.resourceMaskIds) {
         const resource = this.maskImages.get(resourceId);
-        if (resource) context.drawImage(resource, 0, 0, canvas.width, canvas.height);
+        if (!resource) continue;
+        let alphaMask = this.resourceAlphaMasks.get(resourceId);
+        if (!alphaMask) {
+          alphaMask = this.createTintedMask(resource, [255, 255, 255], 1);
+          if (alphaMask) this.resourceAlphaMasks.set(resourceId, alphaMask);
+        }
+        if (alphaMask) context.drawImage(alphaMask, 0, 0, canvas.width, canvas.height);
       }
       context.restore();
     }

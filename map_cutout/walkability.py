@@ -5,7 +5,20 @@ import math
 import numpy as np
 
 
-def adaptive_walkable_boundary(mask: np.ndarray) -> list[list[float]]:
+def _simplify_collinear(points: list[list[float]]) -> list[list[float]]:
+    if len(points) <= 2:
+        return points
+    kept = [points[0]]
+    for previous, current, following in zip(points, points[1:], points[2:]):
+        left = (current[1] - previous[1]) * (following[0] - current[0])
+        right = (following[1] - current[1]) * (current[0] - previous[0])
+        if abs(left - right) > 1e-7:
+            kept.append(current)
+    kept.append(points[-1])
+    return kept
+
+
+def adaptive_walkable_boundaries(mask: np.ndarray) -> list[list[list[float]]]:
     kept = np.asarray(mask, dtype=bool)
     ys, xs = np.nonzero(kept)
     if not len(xs):
@@ -17,8 +30,39 @@ def adaptive_walkable_boundary(mask: np.ndarray) -> list[list[float]]:
     if width < 2 or height < 2:
         return []
     obstacle_height = max(height * .10, min(height * .30, width * .50))
-    boundary_y = float(bottom - obstacle_height)
-    return [[float(left), boundary_y], [float(right), boundary_y]]
+    occupied_columns = np.flatnonzero(kept.any(axis=0))
+    runs: list[list[int]] = []
+    for column in occupied_columns:
+        if not runs or column != runs[-1][-1] + 1:
+            runs.append([int(column)])
+        else:
+            runs[-1].append(int(column))
+    lines = []
+    for run in runs:
+        if len(run) < 2:
+            continue
+        bottoms = np.array([
+            np.flatnonzero(kept[:, column])[-1] + 1 for column in run
+        ], dtype=np.float64)
+        window = min(31, max(3, (len(run) // 20) * 2 + 1))
+        radius = window // 2
+        smoothed = np.array([
+            np.median(bottoms[max(0, index - radius):index + radius + 1])
+            for index in range(len(run))
+        ])
+        points = []
+        for column, local_bottom in zip(run, smoothed):
+            column_pixels = np.flatnonzero(kept[:, column])
+            target = local_bottom - obstacle_height
+            row = int(column_pixels[np.argmin(np.abs(column_pixels - target))])
+            points.append([float(column), float(row)])
+        lines.append(_simplify_collinear(points))
+    return lines
+
+
+def adaptive_walkable_boundary(mask: np.ndarray) -> list[list[float]]:
+    lines = adaptive_walkable_boundaries(mask)
+    return lines[0] if lines else []
 
 
 def _boundary_by_x(lines: list[list[list[float]]], width: int) -> np.ndarray:

@@ -1,5 +1,5 @@
 import { AppState, ApiClient } from "/static/state.js?v=resource-walkability1";
-import { CanvasEditor } from "/static/canvas_editor.js?v=resource-walkability1";
+import { CanvasEditor } from "/static/canvas_editor.js?v=resource-walkability2";
 import { LayerTree } from "/static/layer_tree.js?v=resource-walkability1";
 import { InferenceControls } from "/static/inference_controls.js?v=resource-walkability1";
 import { ExportDialog } from "/static/export_dialog.js";

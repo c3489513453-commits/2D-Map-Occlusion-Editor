@@ -2,6 +2,7 @@ import numpy as np
 
 from map_cutout.walkability import (
     adaptive_walkable_boundary,
+    adaptive_walkable_boundaries,
     compose_final_walkable,
     resource_walkable_and_obstacle,
 )
@@ -26,6 +27,30 @@ def test_empty_and_single_pixel_masks_do_not_create_invalid_lines():
 
     assert adaptive_walkable_boundary(empty) == []
     assert adaptive_walkable_boundary(single) == []
+
+
+def test_adaptive_boundaries_follow_bottom_contour_instead_of_cutting_straight_across():
+    mask = np.zeros((20, 14), dtype=bool)
+    mask[2:18, 1:6] = True
+    mask[2:11, 6:13] = True
+
+    lines = adaptive_walkable_boundaries(mask)
+
+    assert len(lines) == 1
+    by_x = {int(x): y for x, y in lines[0]}
+    assert by_x[1] > by_x[12]
+    assert all(mask[int(y), x] for x, y in by_x.items())
+
+
+def test_adaptive_boundaries_split_at_empty_columns():
+    mask = np.zeros((12, 14), dtype=bool)
+    mask[2:10, 1:5] = True
+    mask[3:11, 8:13] = True
+
+    lines = adaptive_walkable_boundaries(mask)
+
+    assert len(lines) == 2
+    assert max(point[0] for point in lines[0]) < min(point[0] for point in lines[1])
 
 
 def test_short_boundary_leaves_uncovered_resource_pixels_blocked():
