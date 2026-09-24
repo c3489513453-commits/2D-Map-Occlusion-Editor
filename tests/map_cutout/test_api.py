@@ -257,7 +257,7 @@ def test_box_recognition_can_be_added_to_a_walkable_layer(tmp_path):
     assert [item.kind for item in map_state.layers] == ["original"]
 
 
-def test_point_preview_can_commit_into_walkable_layer_without_resource_exclusion(tmp_path):
+def test_point_preview_commit_excludes_resource_masks_from_manual_walkable(tmp_path):
     app_services = services(tmp_path)
     map_state = app_services.project.state.maps[0]
 
@@ -285,7 +285,97 @@ def test_point_preview_can_commit_into_walkable_layer_without_resource_exclusion
     )
 
     assert committed.status_code == 200
-    assert int(np.asarray(Image.open(layer["mask_path"]).convert("L")).min()) == 255
+    assert int(np.asarray(Image.open(layer["mask_path"]).convert("L")).max()) == 0
+
+
+def test_walkable_boundary_lines_can_be_saved_and_are_normalized(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    created = client.post(f"/api/maps/{map_state.id}/layers", json={}).json()
+
+    response = client.put(
+        f"/api/maps/{map_state.id}/layers/{created['id']}/walkable-boundary-lines",
+        json={"lines": [[[2, 3], [10.5, 4]]]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["walkable_boundary_lines"] == [[[2.0, 3.0], [10.5, 4.0]]]
+    assert map_state.layer(created["id"]).walkable_boundary_lines == [
+        [[2.0, 3.0], [10.5, 4.0]]
+    ]
+
+
+def test_auto_walkable_boundaries_only_fill_layers_without_a_line(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    repository = DiskMaskRepository(app_services.project, map_state.id)
+    mask = np.zeros((map_state.height, map_state.width), dtype=bool)
+    mask[2:12, 3:13] = True
+    first = LayerState.mask_layer("first", "木桶", "barrel", repository.save("first", mask))
+    second = LayerState.mask_layer("second", "箱子", "box", repository.save("second", mask))
+    second.walkable_boundary_lines = [[[3.0, 8.0], [12.0, 8.0]]]
+    map_state.layers.extend([first, second])
+
+    generated = client.post(f"/api/maps/{map_state.id}/walkable-boundary-lines/auto")
+    generated_again = client.post(f"/api/maps/{map_state.id}/walkable-boundary-lines/auto")
+
+    assert generated.status_code == 200
+    assert generated.json() == {"created": 1, "skipped": 1}
+    assert first.walkable_boundary_lines == [[[3.0, 9.0], [12.0, 9.0]]]
+    assert second.walkable_boundary_lines == [[[3.0, 8.0], [12.0, 8.0]]]
+    assert generated_again.json() == {"created": 0, "skipped": 2}
+
+
+def test_painting_walkable_automatically_excludes_resource_masks(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    repository = DiskMaskRepository(app_services.project, map_state.id)
+    resource = np.zeros((map_state.height, map_state.width), dtype=bool)
+    resource[4:10, 7:14] = True
+    map_state.layers.append(LayerState.mask_layer(
+        "resource", "木桶", "barrel", repository.save("resource", resource)
+    ))
+    layer = client.post(
+        f"/api/maps/{map_state.id}/walkable/layers", json={"name": "道路"}
+    ).json()
+
+    response = client.post(
+        f"/api/maps/{map_state.id}/walkable/layers/{layer['id']}/paint",
+        json={"shape": "polygon", "points": [[1, 1], [20, 1], [20, 14], [1, 14]], "value": 255},
+    )
+
+    assert response.status_code == 200
+    saved = np.asarray(Image.open(layer["mask_path"]).convert("L")) > 0
+    assert saved[2, 2]
+    assert not saved[5, 8]
+
+
+def test_final_walkable_mask_merges_manual_and_resource_passable_area(tmp_path):
+    app_services = services(tmp_path)
+    client = TestClient(create_app(AppConfig(project_root=tmp_path), app_services))
+    map_state = app_services.project.state.maps[0]
+    repository = DiskMaskRepository(app_services.project, map_state.id)
+    resource = np.zeros((map_state.height, map_state.width), dtype=bool)
+    resource[2:12, 3:13] = True
+    item = LayerState.mask_layer("resource", "木桶", "barrel", repository.save("resource", resource))
+    item.walkable_boundary_lines = [[[3.0, 9.0], [12.0, 9.0]]]
+    map_state.layers.append(item)
+    manual = np.zeros((map_state.height, map_state.width), dtype=bool)
+    manual[1:15, 1:22] = True
+    map_state.walkable_layers.append(LayerState(
+        "road", "道路", "walkable", mask_path=repository.save("walkable-road", manual)
+    ))
+
+    response = client.get(f"/api/maps/{map_state.id}/walkable/final-mask")
+
+    assert response.status_code == 200
+    result = np.asarray(Image.open(io.BytesIO(response.content)).convert("L")) > 0
+    assert result[1, 1]
+    assert result[5, 5]
+    assert not result[10, 5]
 
 
 def test_legacy_locked_mask_can_still_be_edited_after_lock_control_is_removed(tmp_path):

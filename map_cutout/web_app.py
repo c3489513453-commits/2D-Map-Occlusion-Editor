@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -20,7 +20,8 @@ from .commands import (
     DeleteLayerCommand,
     MergeLayersCommand, MoveLayerCommand, RenameLayerCommand, SetLayerLockCommand,
     SetLayerVisibilityCommand, SetOcclusionRegionsCommand, SetOcclusionLinesCommand,
-    SetManyOcclusionLinesCommand,
+    SetManyOcclusionLinesCommand, SetManyWalkableBoundaryLinesCommand,
+    SetWalkableBoundaryLinesCommand,
 )
 from .config import AppConfig
 from .domain import BoundingBox, ExportMode, FolderState, LayerState
@@ -31,6 +32,7 @@ from .jobs import JobManager
 from .masks import paint_circle, paint_polygon, take_unoccupied, to_mask_image
 from .occlusion import baseline_lines_from_mask
 from .project_store import ProjectStore, load_startup_project, remember_project
+from .walkability import adaptive_walkable_boundary, compose_final_walkable
 
 
 class DiskMaskRepository:
@@ -58,6 +60,36 @@ def occupied_mask(state, repository, skip_layer_id: str | None = None) -> np.nda
         if layer.mask_path and layer.id != skip_layer_id:
             occupied |= repository.load(layer.mask_path)
     return occupied
+
+
+def resource_masks(state, repository) -> list[tuple[LayerState, np.ndarray]]:
+    return [
+        (layer, repository.load(layer.mask_path))
+        for layer in state.layers
+        if layer.kind != "original" and layer.mask_path
+    ]
+
+
+def resource_mask_union(state, repository) -> np.ndarray:
+    occupied = np.zeros((state.height, state.width), dtype=bool)
+    for _, mask in resource_masks(state, repository):
+        occupied |= mask
+    return occupied
+
+
+def final_walkable_mask(state, repository) -> np.ndarray:
+    manual = [
+        repository.load(layer.mask_path)
+        for layer in state.walkable_layers
+        if layer.mask_path
+    ]
+    resources = [
+        (mask, layer.walkable_boundary_lines)
+        for layer, mask in resource_masks(state, repository)
+    ]
+    if not manual and not resources:
+        return np.zeros((state.height, state.width), dtype=bool)
+    return compose_final_walkable(manual, resources)
 
 
 def validated_regions(raw, width: int, height: int) -> list[list[list[float]]]:
@@ -413,6 +445,19 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
             headers={"Cache-Control": "no-store"},
         )
 
+    @app.get("/api/maps/{map_id}/walkable/final-mask")
+    def get_final_walkable_mask(map_id: str):
+        state = map_state(map_id)
+        repository = DiskMaskRepository(services.project, map_id)
+        buffer = io.BytesIO()
+        Image.fromarray(to_mask_image(final_walkable_mask(state, repository)), mode="L").save(
+            buffer, format="PNG"
+        )
+        return Response(
+            buffer.getvalue(), media_type="image/png",
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.post("/api/maps/{map_id}/detect")
     def detect(map_id: str, payload: dict = Body(...)):
         state = map_state(map_id)
@@ -521,6 +566,7 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
             repository = DiskMaskRepository(services.project, map_id)
             with services.mask_lock(f"{map_id}:walkable:{layer_id}"):
                 before = repository.load(layer.mask_path)
+                recognized &= ~resource_mask_union(state, repository)
                 if not (recognized & ~before).any():
                     return {"added": False,
                             "reason": "empty" if not recognized.any() else "already"}
@@ -607,6 +653,7 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
                         after = paint_circle(after, start[0]+(end[0]-start[0])*ratio,
                                              start[1]+(end[1]-start[1])*ratio,
                                              float(payload.get("radius", 10)), int(payload.get("value", 255)))
+            after &= ~resource_mask_union(state, repository)
             history(map_id).execute(_EditMask(
                 repository, layer.mask_path, before, after))
         services.project.dirty = True
@@ -644,6 +691,47 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         services.project.dirty = True
         return asdict(layer)
 
+    @app.put("/api/maps/{map_id}/layers/{layer_id}/walkable-boundary-lines")
+    def put_walkable_boundary_lines(map_id: str, layer_id: str, payload: dict = Body(...)):
+        state = map_state(map_id)
+        try:
+            layer = state.layer(layer_id)
+        except KeyError:
+            raise HTTPException(404, "图层不存在")
+        if layer.kind == "original" or not layer.mask_path:
+            raise HTTPException(400, "只有蒙版图层可以编辑可走边界")
+        try:
+            lines = validated_lines(payload.get("lines"), state.width, state.height)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "可走边界格式不正确")
+        history(map_id).execute(SetWalkableBoundaryLinesCommand(state, layer_id, lines))
+        services.project.dirty = True
+        return asdict(layer)
+
+    @app.post("/api/maps/{map_id}/walkable-boundary-lines/auto")
+    def auto_walkable_boundary_lines(map_id: str):
+        state = map_state(map_id)
+        repository = DiskMaskRepository(services.project, map_id)
+        candidates = [
+            layer for layer in state.layers
+            if layer.kind != "original" and layer.mask_path
+        ]
+        skipped = sum(1 for layer in candidates if layer.walkable_boundary_lines)
+        changes = []
+        for layer in candidates:
+            if layer.walkable_boundary_lines:
+                continue
+            line = adaptive_walkable_boundary(repository.load(layer.mask_path))
+            if line:
+                changes.append((layer, [line]))
+        if changes:
+            history(map_id).execute(SetManyWalkableBoundaryLinesCommand(changes))
+            services.project.dirty = True
+        return {
+            "created": len(changes),
+            "skipped": skipped,
+        }
+
     @app.post("/api/maps/{map_id}/walkable/layers/{layer_id}/segment-commit")
     def commit_segment_walkable(map_id: str, layer_id: str, payload: dict = Body(...)):
         state = map_state(map_id)
@@ -654,9 +742,10 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
         repository = DiskMaskRepository(services.project, map_id)
         with services.mask_lock(f"{map_id}:walkable:{layer_id}"):
             before = repository.load(layer.mask_path)
+            after = before | np.asarray(preview["mask"], dtype=bool)
+            after &= ~resource_mask_union(state, repository)
             history(map_id).execute(_EditMask(
-                repository, layer.mask_path, before,
-                before | np.asarray(preview["mask"], dtype=bool)))
+                repository, layer.mask_path, before, after))
         Path(preview["path"]).unlink(missing_ok=True)
         services.project.dirty = True
         return asdict(layer)

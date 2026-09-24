@@ -90,6 +90,25 @@ class SetManyOcclusionLinesCommand:
             layer.occlusion_lines = lines
 
 
+class SetWalkableBoundaryLinesCommand(_SetLayerAttributeCommand):
+    attribute = "walkable_boundary_lines"
+
+
+class SetManyWalkableBoundaryLinesCommand:
+    def __init__(self, changes):
+        self.changes = changes
+        self.previous = [(layer, layer.walkable_boundary_lines) for layer, _ in changes]
+
+    def execute(self):
+        for layer, lines in self.changes:
+            layer.walkable_boundary_lines = lines
+        return [layer for layer, _ in self.changes]
+
+    def undo(self):
+        for layer, lines in self.previous:
+            layer.walkable_boundary_lines = lines
+
+
 class AssignLayerFolderCommand(_SetLayerAttributeCommand):
     attribute = "folder_id"
 
