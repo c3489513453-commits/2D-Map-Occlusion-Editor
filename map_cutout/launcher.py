@@ -25,7 +25,7 @@ def choose_address(start_port: int = 7860, attempts: int = 20) -> tuple[str, int
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="启动本地地图抠图工具")
+    parser = argparse.ArgumentParser(description="启动 2D 地图遮挡与行走区域编辑器")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
@@ -33,7 +33,7 @@ def main(argv=None):
     config = replace(AppConfig(), host=host, port=port)
     app = create_app(config)
     url = f"http://{host}:{port}"
-    print(f"地图抠图工具已启动：{url}")
+    print(f"2D 地图遮挡与行走区域编辑器已启动：{url}")
     print("关闭此窗口即可停止工具。")
     if not args.no_browser:
         Timer(1.2, lambda: webbrowser.open(url)).start()

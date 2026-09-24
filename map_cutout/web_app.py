@@ -207,7 +207,7 @@ def create_app(config: AppConfig | None = None, services: AppServices | None = N
     if services is None:
         project = load_startup_project(config.project_root)
         services = AppServices(project, InferenceService.default(config), JobManager(1))
-    app = FastAPI(title="地图抠图工具")
+    app = FastAPI(title="2D 地图遮挡与行走区域编辑器")
     app.state.services = services
 
     @app.get("/api/health")
