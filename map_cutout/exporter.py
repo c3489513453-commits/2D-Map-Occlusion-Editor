@@ -11,6 +11,7 @@ from PIL import Image
 from .domain import ExportMode
 from .domain import ProjectState
 from .masks import mask_bounds
+from .walkability import compose_final_walkable
 
 
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -160,6 +161,8 @@ class BatchExporter:
         package_dir = output_root / safe_windows_stem(Path(map_state.source_path).stem)
         occluder_dir = package_dir / "occluders"
         entries = []
+        resource_entries = []
+        resource_masks = []
         with Image.open(map_state.source_path) as opened:
             source = opened.convert("RGB")
         package_dir.mkdir(parents=True, exist_ok=True)
@@ -167,7 +170,7 @@ class BatchExporter:
         source.save(map_output, format="PNG")
         report.exported.append(map_output)
         for layer in map_state.layers:
-            if layer.kind == "original" or not layer.mask_path or not layer.occlusion_lines:
+            if layer.kind == "original" or not layer.mask_path:
                 continue
             if request.layer_ids and layer.id not in request.layer_ids:
                 continue
@@ -176,42 +179,55 @@ class BatchExporter:
             if not request.include_hidden and not layer.visible:
                 continue
             try:
-                output = unique_windows_name(occluder_dir, layer.name)
                 mask = np.asarray(Image.open(layer.mask_path).convert("L")) > 0
-                export_layer(source, mask, output, ExportMode.FULL_SIZE)
-                report.exported.append(output)
-                entries.append({
+                resource_masks.append((mask, layer.walkable_boundary_lines))
+                resource_entry = {
                     "id": layer.id,
                     "name": layer.name,
-                    "image": output.relative_to(package_dir).as_posix(),
-                    "imageMode": "full_size",
-                    "lines": layer.occlusion_lines,
-                })
+                    "occlusionLines": layer.occlusion_lines,
+                    "walkableBoundaryLines": layer.walkable_boundary_lines,
+                }
+                if layer.occlusion_lines:
+                    output = unique_windows_name(occluder_dir, layer.name)
+                    export_layer(source, mask, output, ExportMode.FULL_SIZE)
+                    report.exported.append(output)
+                    image_name = output.relative_to(package_dir).as_posix()
+                    resource_entry.update({"image": image_name, "imageMode": "full_size"})
+                    entries.append({
+                        "id": layer.id,
+                        "name": layer.name,
+                        "image": image_name,
+                        "imageMode": "full_size",
+                        "lines": layer.occlusion_lines,
+                    })
+                resource_entries.append(resource_entry)
             except Exception as exc:
                 report.failures.append({"map_id": map_state.id, "layer_id": layer.id,
                                         "name": layer.name, "reason": str(exc)})
         walkable_name = None
         walkable_layers = [layer for layer in map_state.walkable_layers
                            if layer.mask_path and (request.include_hidden or layer.visible)]
-        if walkable_layers:
+        if walkable_layers or resource_masks:
             try:
                 package_dir.mkdir(parents=True, exist_ok=True)
                 walkable_output = package_dir / "walkable.png"
-                combined = np.zeros((map_state.height, map_state.width), dtype=bool)
-                for layer in walkable_layers:
-                    combined |= np.asarray(Image.open(layer.mask_path).convert("L")) > 0
+                manual_masks = [
+                    np.asarray(Image.open(layer.mask_path).convert("L")) > 0
+                    for layer in walkable_layers
+                ]
+                combined = compose_final_walkable(manual_masks, resource_masks)
                 Image.fromarray((combined * 255).astype(np.uint8), mode="L").save(walkable_output)
                 report.exported.append(walkable_output)
                 walkable_name = walkable_output.name
             except Exception as exc:
                 report.failures.append({"map_id": map_state.id, "layer_id": "walkable",
                                         "name": "行走区域", "reason": str(exc)})
-        if not entries and not walkable_name:
+        if not entries and not resource_entries and not walkable_name:
             return
         package_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = package_dir / "occlusion.json"
         manifest_path.write_text(json.dumps({
-            "version": 2,
+            "version": 3,
             "map": {
                 "width": map_state.width,
                 "height": map_state.height,
@@ -222,10 +238,12 @@ class BatchExporter:
             "walkable": ({
                 "mask": walkable_name,
                 "rule": "character_footprint_must_be_inside",
+                "composition": "manual_outside_resources_plus_resource_above_boundary_obstacle_wins",
                 "layers": [{"id": layer.id, "name": layer.name}
                            for layer in walkable_layers],
             } if walkable_name else None),
             "occluders": entries,
+            "resources": resource_entries,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         report.exported.append(manifest_path)
         report.occlusion_manifests.append(manifest_path)
