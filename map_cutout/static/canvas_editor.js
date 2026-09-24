@@ -758,10 +758,14 @@ export class CanvasEditor extends EventTarget {
     const fallbackMasks = [...this.walkableLayerIds].map(id => this.maskImages.get(id)).filter(Boolean);
     const masks = this.finalWalkableMask ? [this.finalWalkableMask] : fallbackMasks;
     if (!masks.length) return false;
-    return footprintIsWalkable(
-      (x, y) => masks.some(mask => this.maskContains(mask, x, y)), position,
-      this.character.footpoint, this.characterScale,
+    const contains = (x, y) => masks.some(mask => this.maskContains(mask, x, y));
+    const footprint = candidate => footprintIsWalkable(
+      contains, candidate, this.character.footpoint, this.characterScale,
     );
+    if (footprint(position)) return true;
+    // A restored/imported character may initially sit outside the configured road.
+    // Let it escape until it first reaches valid ground; normal restrictions then resume.
+    return !footprint(this.character.position);
   }
 
   characterBounds() {

@@ -1,6 +1,6 @@
 <!doctype html><meta charset="utf-8"><title>RUNNING</title>
 <script type="module">
-import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload,canCloseLasso,lassoCommitPoints,topMaskId,footprintIsWalkable,CanvasEditor} from "/static/canvas_editor.js?v=walkable2";
+import {screenToImage,imageToScreen,maskPixelsToTintedRgba,lassoPayload,canCloseLasso,lassoCommitPoints,topMaskId,footprintIsWalkable,CanvasEditor} from "/static/canvas_editor.js?v=character-escape1";
 import {InferenceControls} from "/static/inference_controls.js";
 import {pointInPolygon,opaqueFootpoint,footIsBehindLine,footprintIsBehindLine,nearestLineIndex,nearestLineNode} from "/static/occlusion_preview.js?v=footprint-occlusion2";
 try{
@@ -70,6 +70,12 @@ try{
  if(editor.character.position.x!==12||editor.character.position.y!==12)throw Error("人物走出行走区域时没有停在原位");
  editor.local=()=>({x:14,y:14});editor.pointerMove({});
  if(editor.character.position.x!==14||editor.character.position.y!==14)throw Error("人物在行走区域内无法移动");
+ editor.character.position={x:4,y:4};editor.drag={type:"character",offsetX:0,offsetY:0};editor.local=()=>({x:6,y:6});editor.pointerMove({});
+ if(editor.character.position.x!==6||editor.character.position.y!==6)throw Error("人物从不可走的初始位置无法拖出障碍");
+ editor.local=()=>({x:12,y:12});editor.pointerMove({});
+ if(editor.character.position.x!==12||editor.character.position.y!==12)throw Error("人物脱困后无法进入行走区域");
+ editor.local=()=>({x:24,y:24});editor.pointerMove({});
+ if(editor.character.position.x!==12||editor.character.position.y!==12)throw Error("人物进入行走区域后没有恢复道路限制");
  editor.maskImages.delete("walk-a");editor.character.position={x:14,y:14};editor.local=()=>({x:16,y:16});editor.pointerMove({});
  if(editor.character.position.x!==14||editor.character.position.y!==14)throw Error("行走蒙版尚未加载时不应允许人物穿出限制");
  editor.maskImages.set("walk-a",walkable);
